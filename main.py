@@ -11,12 +11,21 @@ bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
 USED_WORDS = set()
 
+# คลังคำศัพท์จริงสำรองหลายระดับ (ป้องกันขึ้น WORD-xxx เมื่อเน็ตช้า)
+REAL_BACKUP_WORDS = {
+    "A0": ["CAT", "DOG", "SUN", "BOY", "GIRL", "BOOK", "PEN", "FISH", "MILK", "CAR", "TREE", "BIRD", "WATER", "FOOD", "HAND", "RED", "BLUE", "BIG", "RUN", "WALK"],
+    "A1": ["HAPPY", "FAMILY", "SCHOOL", "FRIEND", "HOUSE", "ANIMAL", "APPLE", "DRINK", "MUSIC", "MONEY", "PHONE", "TIME", "DOCTOR", "MOTHER", "FATHER", "CLEAN", "EARLY", "TODAY"],
+    "A2": ["TRAVEL", "WEATHER", "HOLIDAY", "SUNDAY", "FUTURE", "HEALTH", "PICTURE", "SUMMER", "WINTER", "LUNCH", "DINNER", "FARMER", "GARDEN", "KITCHEN", "MARKET", "BEAUTIFUL", "CAREFUL"],
+    "B1": ["SUCCESS", "BUSINESS", "EXPERIENCE", "KNOWLEDGE", "EDUCATION", "OPINION", "DECISION", "PROGRESS", "PROBLEM", "SOLUTION", "COMMUNITY", "CREATIVE", "HABIT", "FEELING", "SOCIETY", "IMPROVE"],
+    "B2": ["STRATEGY", "RESOURCE", "ANALYSIS", "CAPACITY", "CHALLENGE", "CRITICAL", "EVIDENCE", "GLOBAL", "IDENTITY", "OBJECTIVE", "STABILITY", "STRUCTURE", "PERSPECTIVE", "TRANSFORM"]
+}
+
 LEVEL_CONFIG = {
-    "A0": {"min_len": 3, "max_len": 4, "topics": ["cat", "dog", "sun", "red", "boy", "food", "run", "pen"]},
-    "A1": {"min_len": 4, "max_len": 5, "topics": ["family", "school", "house", "water", "music", "time", "apple"]},
-    "A2": {"min_len": 5, "max_len": 7, "topics": ["travel", "weather", "nature", "garden", "market", "dinner"]},
-    "B1": {"min_len": 6, "max_len": 8, "topics": ["business", "education", "health", "society", "habit", "solution"]},
-    "B2": {"min_len": 7, "max_len": 10, "topics": ["strategy", "analysis", "science", "global", "system", "evidence"]}
+    "A0": {"min_len": 3, "max_len": 4, "seeds": ["cat", "dog", "sun", "red", "boy", "pen", "hat", "cup"]},
+    "A1": {"min_len": 4, "max_len": 5, "seeds": ["love", "home", "city", "park", "food", "game", "time", "work"]},
+    "A2": {"min_len": 5, "max_len": 7, "seeds": ["travel", "nature", "garden", "market", "dinner", "person", "system"]},
+    "B1": {"min_len": 6, "max_len": 8, "seeds": ["nature", "health", "action", "detail", "effort", "market", "policy"]},
+    "B2": {"min_len": 7, "max_len": 10, "seeds": ["theory", "method", "system", "factor", "growth", "energy", "future"]}
 }
 
 BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย", "ความรู้", "เทคโนโลยี"]
@@ -39,15 +48,15 @@ async def translate_in_context(session, word: str):
         pass
     return None
 
-# สุ่มดึงคำใหม่สดๆ จาก Datamuse API ทุกครั้งที่กด
+# สุ่มดึงคำใหม่สดๆ จาก Datamuse API (ปรับปรุง query ให้ดึงติดง่ายขึ้น)
 async def fetch_live_word(level: str):
     config = LEVEL_CONFIG[level]
-    topic = random.choice(config["topics"])
-    url = f"https://api.datamuse.com/words?topics={topic}&max=40"
+    seed = random.choice(config["seeds"])
+    url = f"https://api.datamuse.com/words?ml={seed}&max=50"
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=4.0)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     random.shuffle(data)
@@ -66,9 +75,18 @@ async def fetch_live_word(level: str):
         except Exception:
             pass
 
-    # สำรองกรณีเน็ตหลุดจริงๆ (ใช้คำสุ่มผสมเลขไม่ให้ซ้ำ)
-    rand_num = random.randint(100, 999)
-    return {"word": f"WORD-{rand_num}", "correct": "ทดสอบ", "choices": ["ทดสอบ", "ครอบครัว", "การเดินทาง", "ประสบการณ์"]}
+        # สำรองกรณีเน็ตช้ามากๆ จะใช้คำจริงตามระดับเสมอ (ไม่ใช้ WORD-xxx อีกต่อไป)
+        backup_pool = [w for w in REAL_BACKUP_WORDS[level] if w not in USED_WORDS]
+        if not backup_pool:
+            backup_pool = REAL_BACKUP_WORDS[level]
+            
+        fallback_word = random.choice(backup_pool)
+        USED_WORDS.add(fallback_word)
+        thai_meaning = await translate_in_context(session, fallback_word.lower()) or "ความหมาย"
+        fakes = [f for f in BACKUP_FAKES if f != thai_meaning]
+        choices = [thai_meaning] + random.sample(fakes, 3)
+        random.shuffle(choices)
+        return {"word": fallback_word, "correct": thai_meaning, "choices": choices}
 
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
@@ -102,10 +120,8 @@ class LevelSelectView(discord.ui.View):
         super().__init__(timeout=120)
 
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
-        # หน่วงเวลาตอบรับ Discord ก่อนป้องกันปุ่มค้าง
         await interaction.response.defer()
 
-        # ดึงคำศัพท์ใหม่จากอินเทอร์เน็ตสดๆ ทันที
         quiz_data = await fetch_live_word(level)
 
         embed = discord.Embed(
@@ -163,3 +179,4 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
+    
