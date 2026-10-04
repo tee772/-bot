@@ -12,32 +12,23 @@ bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
 USED_WORDS = set()
 
-# คลังคำศัพท์พื้นฐานที่ใช้ในชีวิตประจำวัน แยกตามระดับ CEFR จริง
-BASE_VOCAB = {
-    "A0": ["CAT", "DOG", "SUN", "BOY", "GIRL", "BOOK", "PEN", "FISH", "MILK", "CAR", "TREE", "BIRD", "WATER", "FOOD", "HAND"],
-    "A1": ["HAPPY", "FAMILY", "SCHOOL", "FRIEND", "HOUSE", "ANIMAL", "APPLE", "DRINK", "MUSIC", "MONEY", "PHONE", "TIME", "DOCTOR", "MOTHER", "FATHER"],
-    "A2": ["TRAVEL", "WEATHER", "HOLIDAY", "SUNDAY", "FUTURE", "HEALTH", "PICTURE", "SUMMER", "WINTER", "LUNCH", "DINNER", "FARMER", "GARDEN", "KITCHEN", "MARKET"],
-    "B1": ["SUCCESS", "BUSINESS", "EXPERIENCE", "KNOWLEDGE", "EDUCATION", "OPINION", "DECISION", "PROGRESS", "PROBLEM", "SOLUTION", "COMMUNITY", "CREATIVE", "HABIT", "FEELING", "SOCIETY"],
-    "B2": ["STRATEGY", "RESOURCE", "ANALYSIS", "CAPACITY", "CHALLENGE", "CRITICAL", "EVIDENCE", "GLOBAL", "IDENTITY", "OBJECTIVE", "PRIMITIVE", "STABILITY", "STRUCTURE", "SUSPECT", "TREND"]
+# กำหนดเกณฑ์ความยาวของคำในแต่ละระดับ CEFR เพื่อดึงจาก API
+LEVEL_SPECS = {
+    "A0": {"min_len": 3, "max_len": 4, "topics": ["animal", "color", "food", "body"]},
+    "A1": {"min_len": 4, "max_len": 5, "topics": ["family", "school", "house", "time"]},
+    "A2": {"min_len": 5, "max_len": 7, "topics": ["travel", "weather", "nature", "work"]},
+    "B1": {"min_len": 6, "max_len": 9, "topics": ["business", "education", "health", "society"]},
+    "B2": {"min_len": 7, "max_len": 12, "topics": ["science", "technology", "politics", "economy"]}
 }
 
-# คำศัพท์ขยายเพิ่มเติมสำหรับวนลูปไร้ขีดจำกัด
-EXTRA_SEED_WORDS = {
-    "A0": ["RED", "BLUE", "BIG", "SMALL", "RUN", "WALK", "HOT", "COLD", "EAT", "SEE"],
-    "A1": ["CLEAN", "DIRTY", "EARLY", "LATE", "ALWAYS", "NEVER", "AGAIN", "TODAY", "BEFORE", "AFTER"],
-    "A2": ["ALREADY", "BETWEEN", "BEAUTIFUL", "CAREFUL", "DANGEROUS", "IMPORTANT", "POSSIBLE", "TOGETHER", "WITHOUT", "EVERYWHERE"],
-    "B1": ["ADVANTAGE", "BEHAVIOR", "CONFIDENT", "DIFFERENCE", "EFFECTIVE", "IMPROVE", "OPPORTUNITY", "RECOMMEND", "SITUATION", "VALUABLE"],
-    "B2": ["ABSOLUTE", "COMPLEX", "EVALUATE", "GENERATE", "INDICATE", "MAINTAIN", "PERSPECTIVE", "SIGNIFICANT", "SUFFICIENT", "TRANSFORM"]
-}
-
-BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย"]
+BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย", "การสื่อสาร", "ความรู้"]
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     asyncio.create_task(infinite_word_brain())
 
-# แปลความหมายตามบริบทไทยจริง
+# ดึงคำแปลภาษาไทยจาก Google Translate
 async def translate_in_context(session, word: str):
     url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
     try:
@@ -45,39 +36,60 @@ async def translate_in_context(session, word: str):
             if resp.status == 200:
                 data = await resp.json()
                 translated = data[0][0][0].strip()
+                # กรองไม่ให้เอาคำแปลที่เป็นภาษาอังกฤษ หรือแปลไม่ได้ความหมาย
                 if translated.lower() != word.lower() and len(translated) <= 25:
                     return translated
     except Exception:
         pass
     return None
 
-# สร้างข้อทายจากคลังคำง่าย
+# ดึงคำศัพท์ภาษาอังกฤษใหม่ๆ จาก Datamuse API บนอินเทอร์เน็ต
+async def fetch_words_from_api(session, level: str):
+    spec = LEVEL_SPECS[level]
+    topic = random.choice(spec["topics"])
+    url = f"https://api.datamuse.com/words?topics={topic}&max=50"
+    
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                valid_words = []
+                for item in data:
+                    word = item.get("word", "").upper()
+                    # กรองเอาเฉพาะตัวอักษร A-Z และความยาวตรงตามระดับ
+                    if word.isalpha() and spec["min_len"] <= len(word) <= spec["max_len"]:
+                        if word not in USED_WORDS:
+                            valid_words.append(word)
+                return valid_words
+    except Exception:
+        pass
+    return []
+
+# สร้างโจทย์ทายคำศัพท์
 async def generate_simple_quiz(session, level: str):
-    pool = BASE_VOCAB.get(level, BASE_VOCAB["A1"]) + EXTRA_SEED_WORDS.get(level, EXTRA_SEED_WORDS["A1"])
-    available_words = [w for w in pool if w not in USED_WORDS]
-    
-    if not available_words:
-        available_words = pool
+    words = await fetch_words_from_api(session, level)
+    if not words:
+        return None
         
-    target_word = random.choice(available_words)
-    thai_meaning = await translate_in_context(session, target_word.lower())
-    
-    if thai_meaning:
-        fakes = [f for f in BACKUP_FAKES if f != thai_meaning]
-        selected_fakes = random.sample(fakes, 3)
-        choices = [thai_meaning] + selected_fakes
-        random.shuffle(choices)
-        
-        return {
-            "word": target_word,
-            "correct": thai_meaning,
-            "choices": choices
-        }
+    random.shuffle(words)
+    for target_word in words:
+        thai_meaning = await translate_in_context(session, target_word.lower())
+        if thai_meaning:
+            fakes = [f for f in BACKUP_FAKES if f != thai_meaning]
+            selected_fakes = random.sample(fakes, 3)
+            choices = [thai_meaning] + selected_fakes
+            random.shuffle(choices)
+            
+            return {
+                "word": target_word,
+                "correct": thai_meaning,
+                "choices": choices
+            }
     return None
 
-# สมองคัดกรองเบื้องหลัง วนลูปเตรียมคำง่ายๆ ไว้ใน Cache
+# สมองคัดกรองเบื้องหลัง ดึงคำศัพท์จากอินเทอร์เน็ตเข้ามาเติมใน Cache เรื่อยๆ ไม่จำกัด
 async def infinite_word_brain():
-    print("🧠 สมองเบื้องหลังเริ่มทำงาน: คัดสรรเฉพาะคำศัพท์ง่ายๆ ที่ใช้งานจริง...")
+    print("🧠 สมองเบื้องหลังเริ่มทำงาน: กำลังเชื่อมต่ออินเทอร์เน็ตเพื่อดึงคำศัพท์ใหม่แบบไร้ขีดจำกัด...")
     async with aiohttp.ClientSession() as session:
         while True:
             for level in ["A0", "A1", "A2", "B1", "B2"]:
@@ -86,7 +98,7 @@ async def infinite_word_brain():
                     if quiz:
                         WORD_CACHE[level].append(quiz)
                         USED_WORDS.add(quiz["word"])
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
 
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
@@ -125,6 +137,7 @@ class LevelSelectView(discord.ui.View):
         if WORD_CACHE[level]:
             quiz_data = WORD_CACHE[level].pop(0)
         else:
+            # สำรองข้อมูลฉุกเฉินกรณีเน็ตช้า
             quiz_data = {
                 "word": "HAPPY",
                 "correct": "มีความสุข",
@@ -159,7 +172,6 @@ class LevelSelectView(discord.ui.View):
     async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B2")
 
-    # ปุ่ม "รีบอทใหม่" ใช้ ButtonStyle.secondary (สีเทา) ป้องกันปัญหา AttributeError
     @discord.ui.button(label="รีบอทใหม่", style=discord.ButtonStyle.secondary)
     async def btn_reboot(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.message.delete()
@@ -186,3 +198,4 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
+    
