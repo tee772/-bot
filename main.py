@@ -9,16 +9,14 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# เมล็ดคำศัพท์ความถี่สูงสำหรับค้นหาคำเกี่ยวข้องกันจากอินเทอร์เน็ต
+# เมล็ดคำศัพท์พื้นฐานสุดๆ สำหรับเป็นต้นทางสุ่มคำทั่วไป
 SEED_WORDS = [
-    "cat", "dog", "sun", "red", "boy", "car", "pen", "hat", "cup", "run",
-    "book", "milk", "fish", "home", "love", "tree", "bird", "food", "city",
-    "travel", "weather", "garden", "market", "dinner", "family", "doctor",
-    "health", "education", "business", "society", "solution", "system",
-    "strategy", "analysis", "science", "global", "theory", "method", "factor"
+    "time", "person", "year", "way", "day", "thing", "man", "world", "life", "hand",
+    "part", "child", "eye", "woman", "place", "work", "week", "case", "point", "company",
+    "number", "group", "problem", "fact", "home", "water", "room", "mother", "area", "money"
 ]
 
-# คลังคำศัพท์กลางแบบยังไม่ระบุระดับ (Uncategorized Pool)
+# คลังคำศัพท์กลางที่ผ่านการกรองความถี่แล้ว
 UNCATEGORIZED_CACHE = []
 USED_WORDS = set()
 
@@ -30,7 +28,7 @@ BACKUP_FAKES = [
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    print("🚀 เริ่มดึงคำศัพท์ใหม่จากเน็ตเข้าคลังกลาง (Uncategorized Stream)...")
+    print("🚀 เริ่มระบบดึงคำศัพท์ง่ายใช้งานจริง (Frequency-Filtered Stream)...")
     asyncio.create_task(background_word_fetcher())
 
 async def translate_in_context(session, word: str):
@@ -46,38 +44,64 @@ async def translate_in_context(session, word: str):
         pass
     return None
 
-async def build_quiz_item(session, word: str):
+async def build_quiz_item(session, word: str, score: float):
     thai_meaning = await translate_in_context(session, word.lower())
     if thai_meaning:
         fakes = [f for f in BACKUP_FAKES if f != thai_meaning]
         selected_fakes = random.sample(fakes, min(len(fakes), 3))
         choices = [thai_meaning] + selected_fakes
         random.shuffle(choices)
-        return {"word": word.upper(), "correct": thai_meaning, "choices": choices, "length": len(word)}
+        return {
+            "word": word.upper(), 
+            "correct": thai_meaning, 
+            "choices": choices, 
+            "length": len(word),
+            "freq": score
+        }
     return None
 
-# ดึงคำศัพท์จากเน็ตและแปลภาษาเสร็จสมบูรณ์เข้าคลังกลาง (ยังไม่ระบุระดับ)
+# ระบบดึงข้อมูลแบบกรองความถี่ (Frequency-Based Fetching)
 async def background_word_fetcher():
     async with aiohttp.ClientSession() as session:
         while True:
             if len(UNCATEGORIZED_CACHE) < 200:
                 seed = random.choice(SEED_WORDS)
-                url = f"https://api.datamuse.com/words?ml={seed}&max=40"
+                # ดึงข้อมูลพร้อมสถิติความถี่คำ (md=f)
+                url = f"https://api.datamuse.com/words?ml={seed}&md=f&max=50"
                 try:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            candidates = [seed] + [item.get("word", "") for item in data]
+                            
+                            candidates = []
+                            for item in data:
+                                w = item.get("word", "").strip()
+                                tags = item.get("tags", [])
+                                
+                                # ดึงค่าความถี่ (f: frequency count)
+                                freq_score = 0.0
+                                for tag in tags:
+                                    if tag.startswith("f:"):
+                                        try:
+                                            freq_score = float(tag.split(":")[1])
+                                        except ValueError:
+                                            pass
+                                
+                                # กรองเอาเฉพาะคำที่เป็นตัวอักษรบริสุทธิ์ และมีความถี่ในการใช้งานสูง (> 10.0)
+                                # เพื่อตัดศัพท์ยาก ศัพท์โบราณ หรือศัพท์เฉพาะทางทิ้งทั้งหมด
+                                if w.isalpha() and freq_score > 10.0 and len(w) >= 3:
+                                    candidates.append((w, freq_score))
+
                             random.shuffle(candidates)
                             
-                            for candidate in candidates:
-                                w = candidate.upper()
-                                if w.isalpha() and w not in USED_WORDS and len(w) >= 3:
-                                    quiz = await build_quiz_item(session, w)
+                            for w, freq_score in candidates:
+                                w_upper = w.upper()
+                                if w_upper not in USED_WORDS:
+                                    quiz = await build_quiz_item(session, w_upper, freq_score)
                                     if quiz:
                                         UNCATEGORIZED_CACHE.append(quiz)
-                                        USED_WORDS.add(w)
-                                        print(f"✅ [FETCHED & READY] {w} (ความยาว {len(w)}) | ในคลังกลาง: {len(UNCATEGORIZED_CACHE)} คำ")
+                                        USED_WORDS.add(w_upper)
+                                        print(f"✅ [FETCHED EASY WORD] {w_upper} (ยาว:{len(w_upper)}, ความถี่:{freq_score}) | ในคลัง: {len(UNCATEGORIZED_CACHE)} คำ")
                                         await asyncio.sleep(0.1)
                                         break
                 except Exception as e:
@@ -85,28 +109,34 @@ async def background_word_fetcher():
 
             await asyncio.sleep(0.2)
 
-# ฟังก์ชั่นคัดเลือกคำศัพท์จากคลังกลางโดยกรองระดับความยากตามความยาวคำ
+# ฟังก์ชั่นคัดเลือกคำศัพท์ตามระดับความง่ายจริง (ความถี่สูง + ความยาวเหมาะสม)
 def match_word_for_level(level: str):
     if not UNCATEGORIZED_CACHE:
         return None
 
-    # ปรับจูนระดับใหม่ให้ง่ายและถูกต้องตามมาตรฐานเด็กเริ่มเรียน-ผู้ใช้งานจริง
+    # จัดระดับโดยใช้ทั้ง "ความถี่การใช้จริง (freq)" และ "ความยาวคำ (length)"
     level_filters = {
-        "A0": lambda item: item["length"] == 3,         # ง่ายสุดๆ: เฉพาะคำ 3 ตัวอักษร (DOG, CAT, SUN, PEN)
-        "A1": lambda item: item["length"] == 4,         # ง่าย: เฉพาะคำ 4 ตัวอักษร (BOOK, MILK, FISH, LOVE)
-        "A2": lambda item: item["length"] == 5,         # ปานกลาง: คำ 5 ตัวอักษร (HOUSE, WATER, APPLE)
-        "B1": lambda item: 6 <= item["length"] <= 7,    # ท้าทาย: คำ 6-7 ตัวอักษร (ANIMAL, MARKET)
-        "B2": lambda item: item["length"] >= 8          # ยากขึ้น: คำ 8 ตัวอักษรขึ้นไป (STRATEGY, SCIENCE)
+        # A0: คำสั้นมากๆ และใช้บ่อยมากที่สุดในชีวิตประจำวัน
+        "A0": lambda item: item["length"] <= 4 and item["freq"] >= 50.0,
+        # A1: คำสั้น และใช้บ่อยมาก
+        "A1": lambda item: item["length"] <= 5 and item["freq"] >= 30.0,
+        # A2: คำทั่วไปในชีวิตประจำวัน
+        "A2": lambda item: 4 <= item["length"] <= 6 and item["freq"] >= 20.0,
+        # B1: คำยาวปานกลาง พบเห็นทั่วไป
+        "B1": lambda item: 5 <= item["length"] <= 7 and item["freq"] >= 10.0,
+        # B2: คำยาวหรือซับซ้อนขึ้น
+        "B2": lambda item: item["length"] >= 7
     }
 
     filter_func = level_filters.get(level, lambda item: True)
     
-    # ค้นหาคำที่ตรงกับระดับ
+    # ค้นหาคำที่ตรงตามเกณฑ์ความง่ายของระดับนั้น
     for idx, item in enumerate(UNCATEGORIZED_CACHE):
         if filter_func(item):
             return UNCATEGORIZED_CACHE.pop(idx)
             
-    # กรณีไม่มีคำตรงระดับเป๊ะๆ ในคลังกลาง ให้ดึงคำแรกสุดออกมาใช้
+    # หากไม่มีคำตรงเงื่อนไขเป๊ะๆ ให้ดึงคำที่มีค่าความถี่สูงสุด (ง่ายที่สุด) ออกมาตอบแทน
+    UNCATEGORIZED_CACHE.sort(key=lambda x: x["freq"], reverse=True)
     return UNCATEGORIZED_CACHE.pop(0)
 
 class QuizChoiceView(discord.ui.View):
@@ -170,7 +200,7 @@ class LevelSelectView(discord.ui.View):
         else:
             embed = discord.Embed(
                 title="⏳ กำลังเตรียมคำศัพท์ใหม่...",
-                description=f"กำลังโหลดและประมวลผลคำศัพท์ใหม่จากอินเทอร์เน็ต\n\n**กรุณากดปุ่มอีกครั้งใน 1-2 วินาทีครับ**",
+                description=f"กำลังโหลดคำศัพท์ที่ใช้บ่อยในชีวิตประจำวันจากอินเทอร์เน็ต\n\n**กรุณากดปุ่มอีกครั้งใน 1-2 วินาทีครับ**",
                 color=0xE67E22
             )
             try:
@@ -178,23 +208,23 @@ class LevelSelectView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(label="A0 (ง่ายมากๆ 3 อักษร)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A0 (ง่ายมากๆ)", style=discord.ButtonStyle.primary)
     async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A0")
 
-    @discord.ui.button(label="A1 (ง่าย 4 อักษร)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A1 (ง่าย)", style=discord.ButtonStyle.primary)
     async def btn_a1(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A1")
 
-    @discord.ui.button(label="A2 (ปานกลาง 5 อักษร)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A2 (ปานกลาง)", style=discord.ButtonStyle.primary)
     async def btn_a2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A2")
 
-    @discord.ui.button(label="B1 (ท้าทาย 6-7 อักษร)", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="B1 (ท้าทาย)", style=discord.ButtonStyle.success)
     async def btn_b1(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B1")
 
-    @discord.ui.button(label="B2 (ยากขึ้น 8+ อักษร)", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="B2 (ยากขึ้น)", style=discord.ButtonStyle.success)
     async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B2")
 
@@ -203,7 +233,6 @@ class LevelSelectView(discord.ui.View):
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer()
-            # ลบข้อความเดิมทิ้งทันที
             await interaction.message.delete()
         except Exception:
             pass
@@ -226,7 +255,6 @@ async def on_message(message):
     msg_content = message.content.strip().lower()
     if msg_content in ["t!", "!t"]:
         try:
-            # ลบข้อความสั่ง !t ของผู้ใช้ทิ้งเพื่อความสะอาดของช่องแชท
             await message.delete()
         except Exception:
             pass
@@ -244,3 +272,4 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
+    
