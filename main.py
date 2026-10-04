@@ -9,7 +9,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# แหล่งที่มาไฟล์ Top 5,000 คำศัพท์ภาษาอังกฤษใช้บ่อยที่สุดเรียงตามลำดับความถี่
+# แหล่งที่มาไฟล์ Top 5,000 คำศัพท์ภาษาอังกฤษใช้บ่อยที่สุด
 WORDLIST_URL = "https://raw.githubusercontent.com/david47k/top-english-wordlists/master/top_english_words_lower_10000.txt"
 
 FETCHED_5000_WORDS = []
@@ -32,7 +32,6 @@ async def on_ready():
     print("🚀 เริ่มระบบคัดแยกคำศัพท์และสร้างคลังคำถามล่วงหน้า...")
     asyncio.create_task(background_word_fetcher())
 
-# ฟังก์ชันดึงไฟล์ Top 5,000 คำศัพท์จากอินเทอร์เน็ต
 async def fetch_top_words_from_internet(session):
     global FETCHED_5000_WORDS
     try:
@@ -40,15 +39,13 @@ async def fetch_top_words_from_internet(session):
             if resp.status == 200:
                 text = await resp.text()
                 lines = [line.strip() for line in text.splitlines() if line.strip().isalpha()]
-                # กรองคำสั้นเกินไปออก แล้วตัดเอาเฉพาะ Top 5,000 คำแรกที่ใช้บ่อยที่สุด
                 FETCHED_5000_WORDS = [w for w in lines if len(w) >= 2][:5000]
-                print(f"✅ โหลดคำศัพท์ Top 5,000 คำจากอินเทอร์เน็ตสำเร็จ! (ได้ทั้งหมด {len(FETCHED_5000_WORDS)} คำ)")
+                print(f"✅ โหลดคำศัพท์ Top 5,000 สำเร็จ! ({len(FETCHED_5000_WORDS)} คำ)")
             else:
-                print(f"⚠️ ไม่สามารถดึงไฟล์คำศัพท์ได้ HTTP Code: {resp.status}")
+                print(f"⚠️ HTTP Status: {resp.status}")
     except Exception as e:
-        print(f"⚠️ เกิดข้อผิดพลาดในการโหลดไฟล์คำศัพท์จากอินเทอร์เน็ต: {e}")
+        print(f"⚠️ Load Error: {e}")
 
-# แบ่งช่วงระดับจากสถิติความถี่คำศัพท์ Top 5000
 def get_level_by_rank(index):
     if index < 300:
         return "A0"
@@ -89,28 +86,22 @@ async def build_quiz_item(session, word: str, level: str):
         }
     return None
 
-# สตรีมดึงคำแปลมารวมเป็นคลังคำถามล่วงหน้าก่อนผู้เล่นจะกดเล่น
 async def background_word_fetcher():
     async with aiohttp.ClientSession() as session:
         while True:
-            # รอให้ไฟล์ Top 5000 โหลดเสร็จเรียบร้อยก่อน
             if not FETCHED_5000_WORDS:
                 await asyncio.sleep(1.0)
                 continue
 
             if len(UNCATEGORIZED_CACHE) < 200:
-                # สุ่มเลือกระดับความยาก
                 target_level = random.choice(["A0", "A1", "A2", "B1", "B2"])
-                
-                # คัดเอาเฉพาะคำศัพท์ใน Top 5,000 ที่อยู่ในช่วงระดับนั้นๆ
                 candidates = [
                     (idx, word) for idx, word in enumerate(FETCHED_5000_WORDS) 
                     if get_level_by_rank(idx) == target_level and word.upper() not in USED_WORDS
                 ]
                 
-                # หากเล่นจนครบคำศัพท์ในระดับนั้นแล้ว ให้ล้างประวัติเพื่อสุ่มวนใหม่
                 if not candidates:
-                    print(f"🔄 เล่นครบคำศัพท์ระดับ {target_level} ใน Top 5,000 แล้ว! กำลังรีเซ็ตเพื่อสุ่มวนใหม่...")
+                    print(f"🔄 รีเซ็ตคลังระดับ {target_level} เพื่อเริ่มสุ่มใหม่...")
                     for idx, word in enumerate(FETCHED_5000_WORDS):
                         if get_level_by_rank(idx) == target_level:
                             USED_WORDS.discard(word.upper())
@@ -126,7 +117,7 @@ async def background_word_fetcher():
                     if quiz:
                         UNCATEGORIZED_CACHE.append(quiz)
                         USED_WORDS.add(w_upper)
-                        print(f"✅ [LOADED FROM INTERNET] {w_upper} (อันดับที่ {idx+1} | ระดับ {target_level}) | คลังรวม: {len(UNCATEGORIZED_CACHE)} คำ")
+                        print(f"✅ [LOADED] {w_upper} (#{idx+1} | {target_level}) | คลังรวม: {len(UNCATEGORIZED_CACHE)}")
                         await asyncio.sleep(0.1)
                         break
 
@@ -142,24 +133,13 @@ def match_word_for_level(level: str):
             
     return UNCATEGORIZED_CACHE.pop(0)
 
-# ฟังก์ชันรีเซ็ตและส่งเมนูหลักใหม่เมื่อเกิด Error หรือ Timeout
-async def reset_to_main_menu(channel, old_message=None):
-    if old_message:
+async def auto_clean_message(message):
+    """ลบข้อความทันทีเมื่อหมดเวลาหรือเกิดข้อผิดพลาด"""
+    if message:
         try:
-            await old_message.delete()
+            await message.delete()
         except Exception:
             pass
-    try:
-        embed = discord.Embed(
-            title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ (Top 5,000 Words)", 
-            description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถามได้เลยครับ:", 
-            color=0xF1C40F
-        )
-        new_view = LevelSelectView()
-        new_msg = await channel.send(embed=embed, view=new_view)
-        new_view.message = new_msg
-    except Exception:
-        pass
 
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
@@ -173,8 +153,8 @@ class QuizChoiceView(discord.ui.View):
             self.add_item(button)
 
     async def on_timeout(self):
-        if self.message:
-            await reset_to_main_menu(self.message.channel, self.message)
+        # เมื่อหมดเวลา ลบข้อความนี้ทิ้งทันที
+        await auto_clean_message(self.message)
 
     def make_callback(self, choice):
         async def callback(interaction: discord.Interaction):
@@ -187,17 +167,14 @@ class QuizChoiceView(discord.ui.View):
                 else:
                     embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คำตอบที่ถูกต้องคือ:\n**{self.correct_answer}**", color=0xE74C3C)
 
+                # ปิดใช้งานปุ่มทั้งหมดในคำถามเดิม
                 for item in self.children:
                     item.disabled = True
 
-                await interaction.edit_original_response(view=self)
-                next_embed = discord.Embed(title="🎮 เล่นคำต่อไป", description="เลือกระดับความยากด้านล่างเพื่อเล่นต่อได้เลยครับ:", color=0xF1C40F)
-                next_view = LevelSelectView()
-                sent_msg = await interaction.followup.send(embeds=[embed, next_embed], view=next_view)
-                next_view.message = sent_msg
+                await interaction.edit_original_response(embed=embed, view=self)
 
             except Exception:
-                await reset_to_main_menu(interaction.channel, self.message)
+                await auto_clean_message(self.message)
 
         return callback
 
@@ -207,8 +184,8 @@ class LevelSelectView(discord.ui.View):
         self.message = None
 
     async def on_timeout(self):
-        if self.message:
-            await reset_to_main_menu(self.message.channel, self.message)
+        # เมื่อหมดเวลา ลบข้อความเลือกเมนูนี้ทิ้งทันที
+        await auto_clean_message(self.message)
 
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
         try:
@@ -226,18 +203,21 @@ class LevelSelectView(discord.ui.View):
                 quiz_view = QuizChoiceView(quiz_data["correct"], quiz_data["choices"])
                 sent_msg = await interaction.followup.send(embed=embed, view=quiz_view)
                 quiz_view.message = sent_msg
+                
+                # เมื่อกดเลือกคำถามเสร็จแล้ว ให้ลบเมนูเลือกระดับเดิมทิ้งทันที ไม่ให้ค้างในแชท
+                await auto_clean_message(self.message)
             else:
                 embed = discord.Embed(
-                    title="⏳ กำลังเตรียมคำศัพท์ใหม่...",
-                    description=f"กำลังโหลดคำศัพท์ Top 5,000 จากอินเทอร์เน็ต\n\n**กรุณากดปุ่มอีกครั้งใน 1-2 วินาทีครับ**",
+                    title="⏳ กำลังเตรียมคำศัพท์...",
+                    description="กำลังเตรียมคำศัพท์จากอินเทอร์เน็ต กรุณากดปุ่มใหม่อีกครั้งใน 1-2 วินาทีครับ",
                     color=0xE67E22
                 )
                 await interaction.followup.send(embed=embed, ephemeral=True)
 
         except Exception:
-            await reset_to_main_menu(interaction.channel, self.message)
+            await auto_clean_message(self.message)
 
-    @discord.ui.button(label="A0 (บ่อยสุด 1-300 คำแรก)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A0 (1-300 คำแรก)", style=discord.ButtonStyle.primary)
     async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A0")
 
@@ -269,7 +249,14 @@ async def on_message(message):
         except Exception:
             pass
 
-        await reset_to_main_menu(message.channel)
+        embed = discord.Embed(
+            title="🎯 เลือกความยากคำศัพท์ (Top 5,000 Words)", 
+            description="กดเลือกระดับความยากด้านล่างเพื่อเริ่มคำถามได้เลยครับ:", 
+            color=0xF1C40F
+        )
+        view = LevelSelectView()
+        sent_msg = await message.channel.send(embed=embed, view=view)
+        view.message = sent_msg
         return
 
     await bot.process_commands(message)
@@ -277,3 +264,4 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
+    
