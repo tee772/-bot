@@ -85,18 +85,18 @@ async def background_word_fetcher():
 
             await asyncio.sleep(0.2)
 
-# ฟังก์ชั่นคัดเลือกคำศัพท์จากคลังกลางตามระดับที่ผู้เล่นเลือกจริงๆ
+# ฟังก์ชั่นคัดเลือกคำศัพท์จากคลังกลางโดยกรองระดับความยากตามความยาวคำ
 def match_word_for_level(level: str):
     if not UNCATEGORIZED_CACHE:
         return None
 
-    # ตัวระบุเงื่อนไขระดับความยากตามความซับซ้อนและความยาวของคำศัพท์
+    # ปรับจูนระดับใหม่ให้ง่ายและถูกต้องตามมาตรฐานเด็กเริ่มเรียน-ผู้ใช้งานจริง
     level_filters = {
-        "A0": lambda item: item["length"] <= 4,
-        "A1": lambda item: 4 <= item["length"] <= 5,
-        "A2": lambda item: 5 <= item["length"] <= 6,
-        "B1": lambda item: 6 <= item["length"] <= 7,
-        "B2": lambda item: item["length"] >= 8
+        "A0": lambda item: item["length"] == 3,         # ง่ายสุดๆ: เฉพาะคำ 3 ตัวอักษร (DOG, CAT, SUN, PEN)
+        "A1": lambda item: item["length"] == 4,         # ง่าย: เฉพาะคำ 4 ตัวอักษร (BOOK, MILK, FISH, LOVE)
+        "A2": lambda item: item["length"] == 5,         # ปานกลาง: คำ 5 ตัวอักษร (HOUSE, WATER, APPLE)
+        "B1": lambda item: 6 <= item["length"] <= 7,    # ท้าทาย: คำ 6-7 ตัวอักษร (ANIMAL, MARKET)
+        "B2": lambda item: item["length"] >= 8          # ยากขึ้น: คำ 8 ตัวอักษรขึ้นไป (STRATEGY, SCIENCE)
     }
 
     filter_func = level_filters.get(level, lambda item: True)
@@ -106,7 +106,7 @@ def match_word_for_level(level: str):
         if filter_func(item):
             return UNCATEGORIZED_CACHE.pop(idx)
             
-    # กรณีไม่มีคำตรงระดับเป๊ะๆ ในคลังกลาง ดึงคำสุ่มที่ใกล้เคียงที่สุดมาใช้แทน
+    # กรณีไม่มีคำตรงระดับเป๊ะๆ ในคลังกลาง ให้ดึงคำแรกสุดออกมาใช้
     return UNCATEGORIZED_CACHE.pop(0)
 
 class QuizChoiceView(discord.ui.View):
@@ -154,7 +154,6 @@ class LevelSelectView(discord.ui.View):
         except Exception:
             pass
 
-        # ตัวระบุระดับทำการคัดเลือกคำศัพท์จากคลังกลางที่ดึงเสร็จแล้ว
         quiz_data = match_word_for_level(level)
 
         if quiz_data:
@@ -179,23 +178,23 @@ class LevelSelectView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(label="A0 (ง่ายมาก)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A0 (ง่ายมากๆ 3 อักษร)", style=discord.ButtonStyle.primary)
     async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A0")
 
-    @discord.ui.button(label="A1 (ง่าย)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A1 (ง่าย 4 อักษร)", style=discord.ButtonStyle.primary)
     async def btn_a1(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A1")
 
-    @discord.ui.button(label="A2 (ปานกลาง)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A2 (ปานกลาง 5 อักษร)", style=discord.ButtonStyle.primary)
     async def btn_a2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A2")
 
-    @discord.ui.button(label="B1 (ท้าทาย)", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="B1 (ท้าทาย 6-7 อักษร)", style=discord.ButtonStyle.success)
     async def btn_b1(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B1")
 
-    @discord.ui.button(label="B2 (ยากขึ้น)", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="B2 (ยากขึ้น 8+ อักษร)", style=discord.ButtonStyle.success)
     async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B2")
 
@@ -204,6 +203,7 @@ class LevelSelectView(discord.ui.View):
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer()
+            # ลบข้อความเดิมทิ้งทันที
             await interaction.message.delete()
         except Exception:
             pass
@@ -214,9 +214,9 @@ class LevelSelectView(discord.ui.View):
             color=0xF1C40F
         )
         try:
-            await interaction.followup.send(embed=embed, view=LevelSelectView())
-        except Exception:
             await interaction.channel.send(embed=embed, view=LevelSelectView())
+        except Exception:
+            pass
 
 @bot.event
 async def on_message(message):
@@ -225,6 +225,12 @@ async def on_message(message):
 
     msg_content = message.content.strip().lower()
     if msg_content in ["t!", "!t"]:
+        try:
+            # ลบข้อความสั่ง !t ของผู้ใช้ทิ้งเพื่อความสะอาดของช่องแชท
+            await message.delete()
+        except Exception:
+            pass
+
         embed = discord.Embed(
             title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ (คำศัพท์ใช้งานจริง)", 
             description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถามได้เลยครับ:", 
