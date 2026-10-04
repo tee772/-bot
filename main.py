@@ -9,107 +9,87 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# 1. สมองคลังข้อมูลเบื้องหลัง (Infinite Cache & History Tracking)
 WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
 USED_WORDS = set()
 
-# หมวดหมู่บริบทในการดึงคำศัพท์
-CONTEXT_CATEGORIES = {
-    "A0": ["family", "animals", "daily_life", "food", "objects"],
-    "A1": ["work", "shopping", "feelings", "places", "activities"],
-    "A2": ["travel", "health", "technology", "society", "nature"],
-    "B1": ["business", "education", "relationships", "culture", "environment"],
-    "B2": ["philosophy", "economy", "politics", "science", "psychology"]
+# คลังคำศัพท์พื้นฐานที่ใช้ในชีวิตประจำวัน แยกตามระดับ CEFR จริง
+BASE_VOCAB = {
+    "A0": ["CAT", "DOG", "SUN", "BOY", "GIRL", "BOOK", "PEN", "FISH", "MILK", "CAR", "TREE", "BIRD", "WATER", "FOOD", "HAND"],
+    "A1": ["HAPPY", "FAMILY", "SCHOOL", "FRIEND", "HOUSE", "ANIMAL", "APPLE", "DRINK", "MUSIC", "MONEY", "PHONE", "TIME", "DOCTOR", "MOTHER", "FATHER"],
+    "A2": ["TRAVEL", "WEATHER", "HOLIDAY", "SUNDAY", "FUTURE", "HEALTH", "PICTURE", "SUMMER", "WINTER", "LUNCH", "DINNER", "FARMER", "GARDEN", "KITCHEN", "MARKET"],
+    "B1": ["SUCCESS", "BUSINESS", "EXPERIENCE", "KNOWLEDGE", "EDUCATION", "OPINION", "DECISION", "PROGRESS", "PROBLEM", "SOLUTION", "COMMUNITY", "CREATIVE", "HABIT", "FEELING", "SOCIETY"],
+    "B2": ["STRATEGY", "RESOURCE", "ANALYSIS", "CAPACITY", "CHALLENGE", "CRITICAL", "EVIDENCE", "GLOBAL", "IDENTITY", "OBJECTIVE", "PRIMITIVE", "STABILITY", "STRUCTURE", "SUSPECT", "TREND"]
 }
 
-# ช้อยส์บริบทหลอกตามประเภท เพื่อให้ช้อยส์เนียนสมจริง
-CONTEXT_FAKES = {
-    "A0": ["สัตว์เลี้ยง", "อาหารเช้า", "ของใช้ในบ้าน", "สมาชิกในครอบครัว", "สีสัน"],
-    "A1": ["กิจกรรมยามว่าง", "การเดินทาง", "สถานที่ทำงาน", "อารมณ์ความรู้สึก", "การซื้อของ"],
-    "A2": ["การดูแลสุขภาพ", "สภาพอากาศ", "การท่องเที่ยว", "อุปกรณ์เทคโนโลยี", "ธรรมชาติ"],
-    "B1": ["การบริหารจัดการ", "ความสัมพันธ์", "การวางแผนอนาคต", "การแก้ไขปัญหา", "วัฒนธรรม"],
-    "B2": ["ทัศนคติเชิงบวก", "การวิเคราะห์ข้อมูล", "ความขัดแย้งทางความคิด", "นโยบายสาธารณะ", "ทฤษฎีทางวิทยาศาสตร์"]
+# คำศัพท์ขยายเพิ่มเติมสำหรับวนลูปไร้ขีดจำกัด
+EXTRA_SEED_WORDS = {
+    "A0": ["RED", "BLUE", "BIG", "SMALL", "RUN", "WALK", "HOT", "COLD", "EAT", "SEE"],
+    "A1": ["CLEAN", "DIRTY", "EARLY", "LATE", "ALWAYS", "NEVER", "AGAIN", "TODAY", "BEFORE", "AFTER"],
+    "A2": ["ALREADY", "BETWEEN", "BEAUTIFUL", "CAREFUL", "DANGEROUS", "IMPORTANT", "POSSIBLE", "TOGETHER", "WITHOUT", "EVERYWHERE"],
+    "B1": ["ADVANTAGE", "BEHAVIOR", "CONFIDENT", "DIFFERENCE", "EFFECTIVE", "IMPROVE", "OPPORTUNITY", "RECOMMEND", "SITUATION", "VALUABLE"],
+    "B2": ["ABSOLUTE", "COMPLEX", "EVALUATE", "GENERATE", "INDICATE", "MAINTAIN", "PERSPECTIVE", "SIGNIFICANT", "SUFFICIENT", "TRANSFORM"]
 }
+
+BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย"]
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    # เปิดสมองวนลูปเบื้องหลังทันที
-    asyncio.create_task(infinite_word_finder())
+    asyncio.create_task(infinite_word_brain())
 
-# 2. ระบบแปลตามบริบทภาษาไทย (Context-Aware Translator)
+# แปลความหมายตามบริบทไทยจริง
 async def translate_in_context(session, word: str):
-    # ดึงข้อมูลจาก Google Translation Engine สำหรับบริบทการใช้งานจริง
     url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 translated = data[0][0][0].strip()
-                
-                # กรองไม่ให้แปลทับศัพท์ หรือแปลยาวเป็นประโยค
-                if translated.lower() != word.lower() and 2 <= len(translated) <= 25:
+                if translated.lower() != word.lower() and len(translated) <= 25:
                     return translated
     except Exception:
         pass
     return None
 
-# 3. ค้นหาคำศัพท์วนลูปจาก Datamuse & คัดกรองบริบท
-async def fetch_contextual_quiz(session, level: str):
-    category = random.choice(CONTEXT_CATEGORIES.get(level, CONTEXT_CATEGORIES["A1"]))
-    char = random.choice("abcdefghijklmnopqrstuvwxyz")
-    url = f"https://api.datamuse.com/words?ml={category}&sp={char}*&max=40"
+# สร้างข้อทายจากคลังคำง่าย
+async def generate_simple_quiz(session, level: str):
+    # รวมคลังคำพื้นฐาน + คำขยาย
+    pool = BASE_VOCAB.get(level, BASE_VOCAB["A1"]) + EXTRA_SEED_WORDS.get(level, EXTRA_SEED_WORDS["A1"])
+    available_words = [w for w in pool if w not in USED_WORDS]
     
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                # กรองเอาเฉพาะศัพท์ที่เป็นคำเดี่ยว ไร้ตัวเลข และไม่เคยเล่นมาก่อน
-                candidates = [
-                    item["word"].upper() for item in data 
-                    if item["word"].isalpha() 
-                    and 3 <= len(item["word"]) <= 10 
-                    and item["word"].upper() not in USED_WORDS
-                ]
-                
-                if candidates:
-                    target_word = random.choice(candidates)
-                    thai_context_meaning = await translate_in_context(session, target_word.lower())
-                    
-                    if thai_context_meaning:
-                        # สร้างช้อยส์หลอกตามบริบทที่สมเหตุสมผล
-                        fake_pool = [f for f in CONTEXT_FAKES.get(level, CONTEXT_FAKES["A1"]) if f != thai_context_meaning]
-                        fakes = random.sample(fake_pool, min(3, len(fake_pool)))
-                        
-                        choices = [thai_context_meaning] + fakes
-                        random.shuffle(choices)
-                        
-                        return {
-                            "word": target_word,
-                            "correct": thai_context_meaning,
-                            "choices": choices
-                        }
-    except Exception:
-        pass
+    # ถ้าเล่นจนหมดคลัง ให้รีเซ็ตคลังกลับมาเล่นใหม่ได้วนลูป
+    if not available_words:
+        available_words = pool
+        
+    target_word = random.choice(available_words)
+    thai_meaning = await translate_in_context(session, target_word.lower())
+    
+    if thai_meaning:
+        fakes = [f for f in BACKUP_FAKES if f != thai_meaning]
+        selected_fakes = random.sample(fakes, 3)
+        choices = [thai_meaning] + selected_fakes
+        random.shuffle(choices)
+        
+        return {
+            "word": target_word,
+            "correct": thai_meaning,
+            "choices": choices
+        }
     return None
 
-# 4. สมองวนลูปค้นหาคำศัพท์เบื้องหลังตลอดเวลา (Infinite Background Loop)
-async def infinite_word_finder():
-    print("🧠 สมองเบื้องหลังกำลังทำงานวนลูปค้นหาคำศัพท์ตามบริบทไร้ขีดจำกัด...")
+# สมองคัดกรองเบื้องหลัง วนลูปเตรียมคำง่ายๆ ไว้ใน Cache
+async def infinite_word_brain():
+    print("🧠 สมองเบื้องหลังเริ่มทำงาน: คัดสรรเฉพาะคำศัพท์ง่ายๆ ที่ใช้งานจริง...")
     async with aiohttp.ClientSession() as session:
         while True:
             for level in ["A0", "A1", "A2", "B1", "B2"]:
-                # เติมคำศัพท์ใส่ Cache ถ้ามีน้อยกว่า 5 ข้อ
                 if len(WORD_CACHE[level]) < 5:
-                    quiz_item = await fetch_contextual_quiz(session, level)
-                    if quiz_item:
-                        WORD_CACHE[level].append(quiz_item)
-                        USED_WORDS.add(quiz_item["word"]) # ลงบันทึกห้ามใช้ซ้ำ
-            
-            # พัก 0.8 วินาทีต่อรอบ เพื่อไม่ให้โดนบล็อก IP
-            await asyncio.sleep(0.8)
+                    quiz = await generate_simple_quiz(session, level)
+                    if quiz:
+                        WORD_CACHE[level].append(quiz)
+                        USED_WORDS.add(quiz["word"])
+            await asyncio.sleep(0.5)
 
-# View ปุ่มตอบคำถาม 4 ช้อยส์
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
         super().__init__(timeout=60)
@@ -125,19 +105,18 @@ class QuizChoiceView(discord.ui.View):
             await interaction.response.defer()
             
             if choice == self.correct_answer:
-                embed = discord.Embed(title="🎉 ถูกต้องตามบริบท!", description=f"ความหมายที่ถูกต้องคือ:\n**{choice}**", color=0x2ECC71)
+                embed = discord.Embed(title="🎉 ถูกต้องครับ!", description=f"คำตอบคือ:\n**{choice}**", color=0x2ECC71)
             else:
-                embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คุณเลือก: {choice}\n\nความหมายตามบริบทคือ:\n**{self.correct_answer}**", color=0xE74C3C)
+                embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คำตอบที่ถูกต้องคือ:\n**{self.correct_answer}**", color=0xE74C3C)
 
             for item in self.children:
                 item.disabled = True
             await interaction.edit_original_response(view=self)
 
-            next_embed = discord.Embed(title="🎮 เล่นคำต่อไป", description="เลือกระดับความยากด้านล่างเพื่อเริ่มทายคำต่อไปได้เลยครับ:", color=0xF1C40F)
+            next_embed = discord.Embed(title="🎮 เล่นคำต่อไป", description="เลือกระดับความยากด้านล่างเพื่อเล่นต่อได้เลยครับ:", color=0xF1C40F)
             await interaction.followup.send(embeds=[embed, next_embed], view=LevelSelectView())
         return callback
 
-# View เลือกระดับความยาก (A0 - B2)
 class LevelSelectView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
@@ -145,42 +124,40 @@ class LevelSelectView(discord.ui.View):
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
         await interaction.response.defer()
 
-        # ดึงคำศัพท์ที่สมองคัดกรองบริบทมาเตรียมไว้แล้ว (< 0.1 วินาที)
         if WORD_CACHE[level]:
             quiz_data = WORD_CACHE[level].pop(0)
         else:
-            # สำรองกรณีสมองกำลังประมวลผลคำแรก
             quiz_data = {
-                "word": "PERSPECTIVE",
-                "correct": "มุมมอง / ทัศนคติ",
-                "choices": ["มุมมอง / ทัศนคติ", "สภาพแวดล้อม", "การวางแผนอนาคต", "การบริหารจัดการ"]
+                "word": "HAPPY",
+                "correct": "มีความสุข",
+                "choices": ["มีความสุข", "ครอบครัว", "การเดินทาง", "ประสบการณ์"]
             }
 
         embed = discord.Embed(
             title=f"🎯 ทายคำศัพท์ระดับ {level}",
-            description=f"คำศัพท์: **{quiz_data['word']}**\n\nความหมายตามบริบทการใช้งานจริงคือข้อใด?:",
+            description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยคือข้อใด?:",
             color=0x3498DB
         )
 
         await interaction.followup.send(embed=embed, view=QuizChoiceView(quiz_data["correct"], quiz_data["choices"]))
 
-    @discord.ui.button(label="A0", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A0 (ง่ายมาก)", style=discord.ButtonStyle.primary)
     async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A0")
 
-    @discord.ui.button(label="A1", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A1 (ง่าย)", style=discord.ButtonStyle.primary)
     async def btn_a1(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A1")
 
-    @discord.ui.button(label="A2", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="A2 (ปานกลาง)", style=discord.ButtonStyle.primary)
     async def btn_a2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "A2")
 
-    @discord.ui.button(label="B1", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="B1 (ท้าทาย)", style=discord.ButtonStyle.success)
     async def btn_b1(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B1")
 
-    @discord.ui.button(label="B2", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="B2 (ยากขึ้น)", style=discord.ButtonStyle.success)
     async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B2")
 
@@ -191,7 +168,7 @@ async def on_message(message):
 
     msg_content = message.content.strip().lower()
     if msg_content in ["t!", "!t"]:
-        embed = discord.Embed(title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ", description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถาม:", color=0xF1C40F)
+        embed = discord.Embed(title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ (คำศัพท์ใช้งานจริง)", description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถามง่ายๆ ได้เลยครับ:", color=0xF1C40F)
         await message.channel.send(embed=embed, view=LevelSelectView())
         return
 
@@ -200,4 +177,3 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
-    
