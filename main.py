@@ -12,42 +12,28 @@ bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
 USED_WORDS = set()
 
-# ตั้งค่าเกณฑ์ความยาก ความยาว และค่าความถี่การใช้คำ (Frequency) ให้ตรงตาม CEFR
+# กำหนดรูปแบบการค้นหาของ API (sp = รูปแบบความยาวคำสั้นๆ สไตล์ Wildcard)
 LEVEL_CONFIG = {
     "A0": {
-        "min_len": 2, "max_len": 4, 
-        "min_freq": 20.0,  # บังคับเฉพาะคำที่ใช้บ่อยมากๆ ในภาษาอังกฤษ
-        "topics": ["cat", "dog", "red", "boy", "sun", "car", "pen", "hat", "cup", "run"]
+        "patterns": ["???", "????"],  # บังคับคำสั้น 3-4 อักษรจาก API
+        "topics": ["cat", "dog", "sun", "red", "boy", "car", "pen", "hat", "cup", "run", "fan", "box", "sky", "sea", "bus"]
     },
     "A1": {
-        "min_len": 4, "max_len": 5, 
-        "min_freq": 10.0,  # คำพื้นฐานระดับต้น
-        "topics": ["book", "milk", "fish", "home", "love", "tree", "bird", "food", "city", "park"]
+        "patterns": ["????", "?????"], # บังคับคำสั้น 4-5 อักษรจาก API
+        "topics": ["book", "milk", "fish", "home", "love", "tree", "bird", "food", "city", "park", "game", "time", "work", "rain", "cake"]
     },
     "A2": {
-        "min_len": 5, "max_len": 7, 
-        "min_freq": 4.0, 
-        "topics": ["travel", "weather", "garden", "market", "dinner", "family"]
+        "patterns": ["?????", "??????", "???????"],
+        "topics": ["travel", "weather", "garden", "market", "dinner", "family", "doctor", "summer", "winter"]
     },
     "B1": {
-        "min_len": 6, "max_len": 8, 
-        "min_freq": 1.0, 
-        "topics": ["health", "education", "business", "society", "solution"]
+        "patterns": ["??????", "???????", "????????"],
+        "topics": ["health", "education", "business", "society", "solution", "system", "action", "detail"]
     },
     "B2": {
-        "min_len": 7, "max_len": 10, 
-        "min_freq": 0.1, 
-        "topics": ["strategy", "analysis", "science", "global", "system"]
+        "patterns": ["???????", "????????", "?????????", "──────────"],
+        "topics": ["strategy", "analysis", "science", "global", "system", "theory", "method", "factor"]
     }
-}
-
-# คลังคำง่ายการันตีความถูกต้อง (สำรองชั้นสุดท้าย)
-BASE_VOCAB = {
-    "A0": ["CAT", "DOG", "SUN", "BOY", "GIRL", "PEN", "CAR", "RED", "BLUE", "BIG", "RUN", "HOT", "BED", "BOX", "CUP"],
-    "A1": ["BOOK", "FISH", "MILK", "TREE", "BIRD", "FOOD", "HAND", "HOME", "LOVE", "WALK", "PARK", "GAME", "TIME", "WORK"],
-    "A2": ["TRAVEL", "WEATHER", "HOLIDAY", "SUNDAY", "FUTURE", "HEALTH", "PICTURE", "SUMMER", "WINTER", "GARDEN", "MARKET"],
-    "B1": ["SUCCESS", "BUSINESS", "EXPERIENCE", "KNOWLEDGE", "EDUCATION", "OPINION", "DECISION", "PROGRESS", "PROBLEM"],
-    "B2": ["STRATEGY", "RESOURCE", "ANALYSIS", "CAPACITY", "CHALLENGE", "CRITICAL", "EVIDENCE", "GLOBAL", "IDENTITY"]
 }
 
 BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย", "ความรู้", "เทคโนโลยี"]
@@ -55,16 +41,17 @@ BACKUP_FAKES = ["ความรู้สึก", "การเดินทา�
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    print("🚀 กำลังเริ่มดึงคำศัพท์จากอินเทอร์เน็ตเข้าคลัง...")
     asyncio.create_task(background_word_fetcher())
 
-# แปลความหมายผ่าน Google Translate
 async def translate_in_context(session, word: str):
     url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.0)) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 translated = data[0][0][0].strip()
+                # ต้องแปลได้คำไทยจริง และไม่ใช้อักษรย่อแปลกๆ
                 if translated.lower() != word.lower() and len(translated) <= 25:
                     return translated
     except Exception:
@@ -81,62 +68,41 @@ async def build_quiz_item(session, word: str):
         return {"word": word, "correct": thai_meaning, "choices": choices}
     return None
 
-# สกัดค่า Word Frequency จาก API ของ Datamuse
-def extract_frequency(tags):
-    for tag in tags:
-        if tag.startswith("f:"):
-            try:
-                return float(tag[2:])
-            except ValueError:
-                return 0.0
-    return 0.0
-
-# ระบบเบื้องหลัง: สั่ง API ให้กรองคำยากออกตามค่า Frequency และความยาวคำ
+# ระบบยิง API ดึงคำศัพท์สดจากเน็ตเข้า คลัง (Cache)
 async def background_word_fetcher():
-    print("🧠 สมองเบื้องหลังเริ่มทำงาน: กรองเฉพาะคำง่ายตรงตามระดับจาก API...")
     async with aiohttp.ClientSession() as session:
         while True:
             for level in ["A0", "A1", "A2", "B1", "B2"]:
-                if len(WORD_CACHE[level]) < 8:
+                # เติมคำศัพท์ล่วงหน้าเข้า Cache ให้มีสำรองไว้เสมอ
+                if len(WORD_CACHE[level]) < 10:
                     config = LEVEL_CONFIG[level]
                     topic = random.choice(config["topics"])
-                    # md=f บอก API ให้ส่งค่า Frequency ความฮิตของคำกลับมาด้วย
-                    url = f"https://api.datamuse.com/words?topics={topic}&md=f&max=60"
+                    pattern = random.choice(config["patterns"])
+                    
+                    # ยิงไปที่ Datamuse API โดยตรง
+                    url = f"https://api.datamuse.com/words?ml={topic}&sp={pattern}&max=40"
                     
                     try:
-                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 random.shuffle(data)
                                 for item in data:
                                     w = item.get("word", "").upper()
-                                    tags = item.get("tags", [])
-                                    freq = extract_frequency(tags)
+                                    
+                                    # ต้องเป็นตัวอักษร A-Z เท่านั้น ไม่มีเว้นวรรคหรือขีดฆ่า
+                                    if w.isalpha() and w not in USED_WORDS:
+                                        quiz = await build_quiz_item(session, w)
+                                        if quiz:
+                                            WORD_CACHE[level].append(quiz)
+                                            USED_WORDS.add(w)
+                                            print(f"✅ [API NET] โหลดคำใหม่สำเร็จ ({level}): {w} -> {quiz['correct']} (คลังสะสมสะสมแล้ว {len(WORD_CACHE[level])} คำ)")
+                                            if len(WORD_CACHE[level]) >= 10:
+                                                break
+                    except Exception as e:
+                        print(f"⚠️ API Error ({level}): {e}")
 
-                                    # กรองระดับ API: 1. เป็นตัวอักษรล้วน 2. ความยาวตรงระดับ 3. ค่าความฮิต (Frequency) ต้องสูงตามเกณฑ์
-                                    if w.isalpha() and config["min_len"] <= len(w) <= config["max_len"] and freq >= config["min_freq"]:
-                                        if w not in USED_WORDS:
-                                            quiz = await build_quiz_item(session, w)
-                                            if quiz:
-                                                WORD_CACHE[level].append(quiz)
-                                                USED_WORDS.add(w)
-                                                if len(WORD_CACHE[level]) >= 8:
-                                                    break
-                    except Exception:
-                        pass
-
-                    # หาก API ดึงคำมาไม่ทัน ให้ดึงคลังคำพื้นฐานการันตีมาใช้งาน
-                    if len(WORD_CACHE[level]) < 3:
-                        pool = [w for w in BASE_VOCAB[level] if w not in USED_WORDS]
-                        if not pool:
-                            pool = BASE_VOCAB[level]
-                        w = random.choice(pool)
-                        quiz = await build_quiz_item(session, w)
-                        if quiz:
-                            WORD_CACHE[level].append(quiz)
-                            USED_WORDS.add(w)
-
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
@@ -172,14 +138,15 @@ class LevelSelectView(discord.ui.View):
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
         await interaction.response.defer()
 
+        # ดึงคำศัพท์ที่โหลดสดมาจากเน็ตเท่านั้น
         if WORD_CACHE[level]:
             quiz_data = WORD_CACHE[level].pop(0)
         else:
-            word = random.choice(BASE_VOCAB[level])
+            # กรณีผู้เล่นกดเร็วมากๆ ก่อนที่เน็ตจะโหลดคำแรกเสร็จ
             quiz_data = {
-                "word": word,
-                "correct": "คำศัพท์พื้นฐาน",
-                "choices": ["คำศัพท์พื้นฐาน", "ครอบครัว", "การเดินทาง", "ประสบการณ์"]
+                "word": "LOADING...",
+                "correct": "กำลังโหลด",
+                "choices": ["กำลังโหลด", "กรุณารอสักครู่", "กดอีกครั้ง", "ลองใหม่"]
             }
 
         embed = discord.Embed(
