@@ -21,7 +21,6 @@ async def on_ready():
 
 # ดึงคำศัพท์ภาษาอังกฤษที่เน้นคำใช้จริงในชีวิตประจำวันผ่าน Datamuse Vocabulary API
 async def fetch_common_word(level: str):
-    # กำหนดหัวข้อ/หมวดหมู่คำศัพท์ที่พบบ่อยตามระดับ
     topics = {
         "A0": ["family", "color", "animal", "number", "food"],
         "A1": ["home", "school", "clothes", "time", "body"],
@@ -39,7 +38,6 @@ async def fetch_common_word(level: str):
             async with session.get(url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    # คัดเฉพาะคำศัพท์ยาว 3-8 ตัวอักษรที่ไม่ซับซ้อนเกินไป
                     filtered = [
                         item["word"] for item in data 
                         if item["word"].isalpha() and 3 <= len(item["word"]) <= 8
@@ -50,7 +48,7 @@ async def fetch_common_word(level: str):
         pass
     return "water"
 
-# แปลคำศัพท์เป็นภาษาไทย และขัดเกลาคำแปลให้อ่านง่าย
+# แปลคำศัพท์เป็นภาษาไทย
 async def fetch_clean_thai_translation(word: str):
     url = f"https://api.mymemory.translated.net/get?q={word}&langpair=en|th"
     timeout = aiohttp.ClientTimeout(total=3)
@@ -60,7 +58,6 @@ async def fetch_clean_thai_translation(word: str):
                 if resp.status == 200:
                     data = await resp.json()
                     raw_text = data['responseData']['translatedText'].strip()
-                    # คัดแยกเฉพาะคำแรกหากมีเครื่องหมายจุลภาค หรือตัดคำแปลกๆ ออก
                     clean_text = raw_text.split(',')[0].split(';')[0].strip()
                     if clean_text.lower() != word.lower() and len(clean_text) < 30:
                         return clean_text
@@ -117,21 +114,25 @@ class LevelSelectView(discord.ui.View):
         super().__init__(timeout=120)
 
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
-        await interaction.response.defer()
+        # 1. แจ้งผู้ใช้ทันทีว่ากำลังประมวลผลพร้อมประมาณการเวลา
+        loading_embed = discord.Embed(
+            title="⏳ บอทกำลังสุ่มคำศัพท์และแปลภาษา...",
+            description="กรุณารอสักครู่ คาดว่าจะใช้เวลาประมาณ **2 - 3 วินาที**",
+            color=0xE67E22
+        )
+        await interaction.response.send_message(embed=loading_embed)
 
-        # 1. สุ่มคำศัพท์หลักและคำศัพท์หลอก 3 คำจากหมวดหมู่ตามระดับ
+        # 2. ทำการสุ่มและแปลข้อมูลจาก API
         target_word = await fetch_common_word(level)
         fake_word1 = await fetch_common_word(level)
         fake_word2 = await fetch_common_word(level)
         fake_word3 = await fetch_common_word(level)
 
-        # 2. แปลเป็นภาษาไทยพร้อมขัดเกลาคำแปล
         correct_th = await fetch_clean_thai_translation(target_word)
         fake_th1 = await fetch_clean_thai_translation(fake_word1)
         fake_th2 = await fetch_clean_thai_translation(fake_word2)
         fake_th3 = await fetch_clean_thai_translation(fake_word3)
 
-        # 3. รวบรวมตัวเลือกและป้องกันตัวเลือกซ้ำกัน
         choices_set = {correct_th, fake_th1, fake_th2, fake_th3}
         while len(choices_set) < 4:
             extra_word = await fetch_common_word(level)
@@ -141,13 +142,14 @@ class LevelSelectView(discord.ui.View):
         choices = list(choices_set)
         random.shuffle(choices)
 
-        embed = discord.Embed(
+        quiz_embed = discord.Embed(
             title=f"🎯 ทายคำศัพท์ระดับ {level}",
             description=f"คำศัพท์: **{target_word.upper()}**\n\nคำแปลภาษาไทยของคำนี้คือข้อใด?:",
             color=0x3498DB
         )
 
-        await interaction.followup.send(embed=embed, view=QuizChoiceView(correct_th, choices))
+        # 3. แก้ไขข้อความกำลังโหลดเป็นข้อความคำถามและเปิดปุ่ม 4 ช้อยส์
+        await interaction.edit_original_response(embed=quiz_embed, view=QuizChoiceView(correct_th, choices))
 
     @discord.ui.button(label="A0", style=discord.ButtonStyle.primary)
     async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
