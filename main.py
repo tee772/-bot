@@ -9,7 +9,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# แหล่งที่มาไฟล์ Top 5,000 คำศัพท์ภาษาอังกฤษใช้บ่อยที่สุด
+# ไฟล์ Top 5,000 คำศัพท์ความถี่สูงสุดจาก GitHub
 WORDLIST_URL = "https://raw.githubusercontent.com/david47k/top-english-wordlists/master/top_english_words_lower_10000.txt"
 
 FETCHED_5000_WORDS = []
@@ -24,12 +24,12 @@ BACKUP_FAKES = [
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    print("🌐 กำลังเริ่มดาวน์โหลดไฟล์ 5,000 คำศัพท์ใช้บ่อยที่สุดจากอินเทอร์เน็ต...")
+    print("🌐 กำลังดาวน์โหลด Top 5,000 คำศัพท์จากอินเทอร์เน็ต...")
     
     async with aiohttp.ClientSession() as session:
         await fetch_top_words_from_internet(session)
         
-    print("🚀 เริ่มระบบคัดแยกคำศัพท์และสร้างคลังคำถามล่วงหน้า...")
+    print("🚀 เริ่มระบบโหลดคำแปลตุนไว้เบื้องหลัง...")
     asyncio.create_task(background_word_fetcher())
 
 async def fetch_top_words_from_internet(session):
@@ -40,7 +40,7 @@ async def fetch_top_words_from_internet(session):
                 text = await resp.text()
                 lines = [line.strip() for line in text.splitlines() if line.strip().isalpha()]
                 FETCHED_5000_WORDS = [w for w in lines if len(w) >= 2][:5000]
-                print(f"✅ โหลดคำศัพท์ Top 5,000 สำเร็จ! ({len(FETCHED_5000_WORDS)} คำ)")
+                print(f"✅ โหลดไฟล์ Top 5,000 คำสำเร็จ! ({len(FETCHED_5000_WORDS)} คำ)")
             else:
                 print(f"⚠️ HTTP Status: {resp.status}")
     except Exception as e:
@@ -87,6 +87,7 @@ async def build_quiz_item(session, word: str, level: str):
     return None
 
 async def background_word_fetcher():
+    """ระบบเบื้องหลังสำหรับโหลดคำแปลตุนไว้ในแคช 200 คำ"""
     async with aiohttp.ClientSession() as session:
         while True:
             if not FETCHED_5000_WORDS:
@@ -101,7 +102,6 @@ async def background_word_fetcher():
                 ]
                 
                 if not candidates:
-                    print(f"🔄 รีเซ็ตคลังระดับ {target_level} เพื่อเริ่มสุ่มใหม่...")
                     for idx, word in enumerate(FETCHED_5000_WORDS):
                         if get_level_by_rank(idx) == target_level:
                             USED_WORDS.discard(word.upper())
@@ -117,7 +117,7 @@ async def background_word_fetcher():
                     if quiz:
                         UNCATEGORIZED_CACHE.append(quiz)
                         USED_WORDS.add(w_upper)
-                        print(f"✅ [LOADED] {w_upper} (#{idx+1} | {target_level}) | คลังรวม: {len(UNCATEGORIZED_CACHE)}")
+                        print(f"✅ [LOADED] {w_upper} (#{idx+1} | {target_level}) | คลังรวม: {len(UNCATEGORIZED_CACHE)} คำ")
                         await asyncio.sleep(0.1)
                         break
 
@@ -133,89 +133,60 @@ def match_word_for_level(level: str):
             
     return UNCATEGORIZED_CACHE.pop(0)
 
-async def auto_clean_message(message):
-    """ลบข้อความทันทีเมื่อหมดเวลาหรือเกิดข้อผิดพลาด"""
-    if message:
-        try:
-            await message.delete()
-        except Exception:
-            pass
-
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
         super().__init__(timeout=60)
         self.correct_answer = correct_answer
-        self.message = None
-
-        for choice in choices:
-            button = discord.ui.Button(label=choice[:80], style=discord.ButtonStyle.secondary)
-            button.callback = self.make_callback(choice)
-            self.add_item(button)
-
-    async def on_timeout(self):
-        # เมื่อหมดเวลา ลบข้อความนี้ทิ้งทันที
-        await auto_clean_message(self.message)
 
     def make_callback(self, choice):
         async def callback(interaction: discord.Interaction):
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.defer()
+            if not interaction.response.is_done():
+                await interaction.response.defer()
 
-                if choice == self.correct_answer:
-                    embed = discord.Embed(title="🎉 ถูกต้องครับ!", description=f"คำตอบคือ:\n**{choice}**", color=0x2ECC71)
-                else:
-                    embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คำตอบที่ถูกต้องคือ:\n**{self.correct_answer}**", color=0xE74C3C)
+            if choice == self.correct_answer:
+                embed = discord.Embed(title="🎉 ถูกต้องครับ!", description=f"คำตอบคือ:\n**{choice}**", color=0x2ECC71)
+            else:
+                embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คำตอบที่ถูกต้องคือ:\n**{self.correct_answer}**", color=0xE74C3C)
 
-                # ปิดใช้งานปุ่มทั้งหมดในคำถามเดิม
-                for item in self.children:
-                    item.disabled = True
+            # ปิดปุ่มกดในข้อสอบนี้เมื่อตอบแล้ว
+            for item in self.children:
+                item.disabled = True
 
-                await interaction.edit_original_response(embed=embed, view=self)
-
-            except Exception:
-                await auto_clean_message(self.message)
+            await interaction.edit_original_response(embed=embed, view=self)
 
         return callback
 
 class LevelSelectView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=60)
-        self.message = None
-
-    async def on_timeout(self):
-        # เมื่อหมดเวลา ลบข้อความเลือกเมนูนี้ทิ้งทันที
-        await auto_clean_message(self.message)
 
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer()
+        if not interaction.response.is_done():
+            await interaction.response.defer()
 
-            quiz_data = match_word_for_level(level)
+        quiz_data = match_word_for_level(level)
 
-            if quiz_data:
-                embed = discord.Embed(
-                    title=f"🎯 ทายคำศัพท์ระดับ {level}",
-                    description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยคือข้อใด?:",
-                    color=0x3498DB
-                )
-                quiz_view = QuizChoiceView(quiz_data["correct"], quiz_data["choices"])
-                sent_msg = await interaction.followup.send(embed=embed, view=quiz_view)
-                quiz_view.message = sent_msg
-                
-                # เมื่อกดเลือกคำถามเสร็จแล้ว ให้ลบเมนูเลือกระดับเดิมทิ้งทันที ไม่ให้ค้างในแชท
-                await auto_clean_message(self.message)
-            else:
-                embed = discord.Embed(
-                    title="⏳ กำลังเตรียมคำศัพท์...",
-                    description="กำลังเตรียมคำศัพท์จากอินเทอร์เน็ต กรุณากดปุ่มใหม่อีกครั้งใน 1-2 วินาทีครับ",
-                    color=0xE67E22
-                )
-                await interaction.followup.send(embed=embed, ephemeral=True)
+        if quiz_data:
+            embed = discord.Embed(
+                title=f"🎯 ทายคำศัพท์ระดับ {level}",
+                description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยคือข้อใด?:",
+                color=0x3498DB
+            )
+            quiz_view = QuizChoiceView(quiz_data["correct"], quiz_data["choices"])
+            
+            for choice in quiz_data["choices"]:
+                button = discord.ui.Button(label=choice[:80], style=discord.ButtonStyle.secondary)
+                button.callback = quiz_view.make_callback(choice)
+                quiz_view.add_item(button)
 
-        except Exception:
-            await auto_clean_message(self.message)
+            await interaction.followup.send(embed=embed, view=quiz_view)
+        else:
+            embed = discord.Embed(
+                title="⏳ กำลังเตรียมคำศัพท์...",
+                description="ระบบกำลังเตรียมคำศัพท์จากอินเทอร์เน็ต กรุณากดปุ่มอีกครั้งใน 1-2 วินาทีครับ",
+                color=0xE67E22
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="A0 (1-300 คำแรก)", style=discord.ButtonStyle.primary)
     async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -255,8 +226,7 @@ async def on_message(message):
             color=0xF1C40F
         )
         view = LevelSelectView()
-        sent_msg = await message.channel.send(embed=embed, view=view)
-        view.message = sent_msg
+        await message.channel.send(embed=embed, view=view)
         return
 
     await bot.process_commands(message)
