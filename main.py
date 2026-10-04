@@ -9,7 +9,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# กำหนดหมวดหมู่คำศัพท์เพื่อบีบ scope ให้อยู่ในระดับ CEFR A0 - B2
+# คลังเก็บคำศัพท์ชั่วคราวใน Memory (Cache Queue)
+WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
+
 TOPIC_MAP = {
     "A0": ["color", "animal", "number", "food", "family"],
     "A1": ["home", "school", "clothes", "time", "body", "city"],
@@ -18,42 +20,20 @@ TOPIC_MAP = {
     "B2": ["opinion", "process", "system", "culture", "law", "economy"]
 }
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        return
-    raise error
+# สำรองช้อยส์กรณี API แปลภาษาขัดข้อง
+BACKUP_FAKES = ["การเดินทาง", "ความสัมพันธ์", "สถานที่", "ความคิดเห็น", "การพัฒนา", "ความรู้สึก", "เป้าหมาย"]
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    # เมื่อบอทพร้อม ทำการดึงคำศัพท์ล่วงหน้ามาเติมใส่ Cache ทันที
+    asyncio.create_task(preload_all_caches())
 
-# 1. Generate สุ่มคำศัพท์ภาษาอังกฤษสดๆ จาก Datamuse API ตามระดับความยาก
-async def generate_english_word(session, level: str):
-    topic = random.choice(TOPICS_MAP.get(level, TOPIC_MAP["A1"]))
-    # สุ่มอักษรตัวแรกเพื่อไม่ให้ได้คำซ้ำเดิม
-    random_char = random.choice("abcdefghijklmnopqrstuvwxyz")
-    url = f"https://api.datamuse.com/words?ml={topic}&sp={random_char}*&max=20"
-    
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                words = [
-                    item["word"] for item in data 
-                    if item["word"].isalpha() and 3 <= len(item["word"]) <= 8
-                ]
-                if words:
-                    return random.choice(words)
-    except Exception:
-        pass
-    return "example"
-
-# 2. Generate แปลคำศัพท์หลักเป็นภาษาไทยผ่าน API
-async def generate_thai_translation(session, word: str):
+# แปลคำศัพท์เป็นภาษาไทย
+async def fetch_translation(session, word: str):
     url = f"https://api.mymemory.translated.net/get?q={word}&langpair=en|th"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 raw_text = data['responseData']['translatedText'].strip()
@@ -62,19 +42,50 @@ async def generate_thai_translation(session, word: str):
                     return clean_text
     except Exception:
         pass
-    return f"ความหมายของ {word}"
+    return None
 
-# 3. Generate ช้อยส์หลอกภาษาไทยสดๆ ที่อ้างอิงจากคำแปลใกล้เคียง
-async def generate_fake_choices(session, level: str):
-    # ดึงคำศัพท์หลอก 3 คำ
-    tasks = [generate_english_word(session, level) for _ in range(3)]
-    fake_words = await asyncio.gather(*tasks)
+# สุ่มคำศัพท์และแปลไทย 1 ข้อ
+async def fetch_single_quiz(session, level: str):
+    topic = random.choice(TOPIC_MAP.get(level, TOPIC_MAP["A1"]))
+    char = random.choice("abcdefghijklmnopqrstuvwxyz")
+    url = f"https://api.datamuse.com/words?ml={topic}&sp={char}*&max=30"
     
-    # แปลคำศัพท์หลอกเป็นภาษาไทยพร้อมกัน
-    trans_tasks = [generate_thai_translation(session, w) for w in fake_words]
-    fake_translations = await asyncio.gather(*trans_tasks)
-    
-    return fake_translations
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                words = [item["word"] for item in data if item["word"].isalpha() and 3 <= len(item["word"]) <= 8]
+                if words:
+                    target_word = random.choice(words)
+                    translation = await fetch_translation(session, target_word)
+                    if translation:
+                        # สร้างช้อยส์หลอก
+                        fake_samples = random.sample(BACKUP_FAKES, 3)
+                        choices = [translation] + fake_samples
+                        random.shuffle(choices)
+                        return {
+                            "word": target_word.upper(),
+                            "correct": translation,
+                            "choices": choices
+                        }
+    except Exception:
+        pass
+    return None
+
+# ระบบเติมคำศัพท์ใส่ Cache ในฉากหลัง
+async def refill_cache(level: str, count: int = 5):
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_single_quiz(session, level) for _ in range(count)]
+        results = await asyncio.gather(*tasks)
+        for res in results:
+            if res:
+                WORD_CACHE[level].append(res)
+
+async def preload_all_caches():
+    print("⏳ กำลังเริ่มดึงคำศัพท์ล่วงหน้าเข้า Cache...")
+    for lvl in ["A0", "A1", "A2", "B1", "B2"]:
+        await refill_cache(lvl, count=5)
+    print("✅ เตรียมคลังคำศัพท์ล่วงหน้าเรียบร้อยพร้อมเล่น!")
 
 # View ปุ่มตอบคำถาม 4 ช้อยส์
 class QuizChoiceView(discord.ui.View):
@@ -83,10 +94,7 @@ class QuizChoiceView(discord.ui.View):
         self.correct_answer = correct_answer
 
         for choice in choices:
-            button = discord.ui.Button(
-                label=choice[:80],
-                style=discord.ButtonStyle.secondary
-            )
+            button = discord.ui.Button(label=choice[:80], style=discord.ButtonStyle.secondary)
             button.callback = self.make_callback(choice)
             self.add_item(button)
 
@@ -95,27 +103,15 @@ class QuizChoiceView(discord.ui.View):
             await interaction.response.defer()
             
             if choice == self.correct_answer:
-                embed = discord.Embed(
-                    title="🎉 ถูกต้องครับ!",
-                    description=f"คำตอบที่ถูกต้องคือ:\n**{choice}**",
-                    color=0x2ECC71
-                )
+                embed = discord.Embed(title="🎉 ถูกต้องครับ!", description=f"คำตอบที่ถูกต้องคือ:\n**{choice}**", color=0x2ECC71)
             else:
-                embed = discord.Embed(
-                    title="❌ ยังไม่ถูกต้องครับ",
-                    description=f"คุณเลือก: {choice}\n\nคำตอบที่ถูกต้องคือ:\n**{self.correct_answer}**",
-                    color=0xE74C3C
-                )
+                embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คำตอบที่ถูกต้องคือ:\n**{self.correct_answer}**", color=0xE74C3C)
 
             for item in self.children:
                 item.disabled = True
             await interaction.edit_original_response(view=self)
 
-            next_embed = discord.Embed(
-                title="🎮 เล่นคำต่อไป",
-                description="เลือกระดับความยากด้านล่างเพื่อเริ่มทายคำต่อไปได้เลยครับ:",
-                color=0xF1C40F
-            )
+            next_embed = discord.Embed(title="🎮 เล่นคำต่อไป", description="เลือกระดับความยากด้านล่างเพื่อเริ่มทายคำต่อไปได้เลยครับ:", color=0xF1C40F)
             await interaction.followup.send(embeds=[embed, next_embed], view=LevelSelectView())
         return callback
 
@@ -125,47 +121,35 @@ class LevelSelectView(discord.ui.View):
         super().__init__(timeout=120)
 
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
-        # 1. แจ้งสถานะการประมวลผลทันที
-        loading_embed = discord.Embed(
-            title="⚡ กำลัง Generate คำศัพท์สด...",
-            description="คาดว่าจะใช้เวลาประมาณ **1 - 2 วินาที**",
-            color=0xE67E22
-        )
-        await interaction.response.send_message(embed=loading_embed)
+        await interaction.response.defer()
 
-        # 2. รันระบบ Generate แบบ Parallel
-        async with aiohttp.ClientSession() as session:
-            # Generate คำศัพท์หลัก
-            target_word = await generate_english_word(session, level)
-            
-            # Generate คำแปลหลัก + ช้อยส์หลอกพร้อมกัน
-            correct_th_task = generate_thai_translation(session, target_word)
-            fake_choices_task = generate_fake_choices(session, level)
-            
-            correct_th, fake_choices = await asyncio.gather(correct_th_task, fake_choices_task)
+        # 1. ตรวจสอบว่าใน Cache มีคำศัพท์เหลือไหม
+        if not WORD_CACHE[level]:
+            # ถ้า Cache หมด ให้ดึงสด 1 ข้อเป็น Fallback
+            async with aiohttp.ClientSession() as session:
+                quiz_data = await fetch_single_quiz(session, level)
+        else:
+            # ดึงคำศัพท์จาก Cache ทันที (Instant Speed < 0.1s)
+            quiz_data = WORD_CACHE[level].pop(0)
 
-            # รวมช้อยส์และตัดตัวเลือกที่ซ้ำกัน
-            choices_set = {correct_th}
-            for fake in fake_choices:
-                if fake != correct_th:
-                    choices_set.add(fake)
-            
-            # หากตัวเลือกไม่ครบ 4 ให้เติมช้อยส์ทั่วไป
-            backup_fakes = ["สถานที่", "การกระทำ", "ความรู้สึก", "วัตถุสิ่งของ", "สถานการณ์"]
-            while len(choices_set) < 4:
-                choices_set.add(backup_fakes.pop())
+        # 2. แอบสั่งเติมคำศัพท์ใหม่เข้า Cache ในฉากหลังทันที (ไม่บล็อกการเล่น)
+        asyncio.create_task(refill_cache(level, count=2))
 
-            choices = list(choices_set)
-            random.shuffle(choices)
+        if not quiz_data:
+            # กรณีเกิดฉุกเฉิน API ล่มจริงๆ ให้ใช้ข้อความสำรอง
+            quiz_data = {
+                "word": "KNOWLEDGE",
+                "correct": "ความรู้",
+                "choices": ["ความรู้", "ความคิด", "ความรู้สึก", "ประสบการณ์"]
+            }
 
-        quiz_embed = discord.Embed(
+        embed = discord.Embed(
             title=f"🎯 ทายคำศัพท์ระดับ {level}",
-            description=f"คำศัพท์: **{target_word.upper()}**\n\nคำแปลภาษาไทยของคำนี้คือข้อใด?:",
+            description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยของคำนี้คือข้อใด?:",
             color=0x3498DB
         )
 
-        # 3. ส่งคำถามทันที
-        await interaction.edit_original_response(embed=quiz_embed, view=QuizChoiceView(correct_th, choices))
+        await interaction.followup.send(embed=embed, view=QuizChoiceView(quiz_data["correct"], quiz_data["choices"]))
 
     @discord.ui.button(label="A0", style=discord.ButtonStyle.primary)
     async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -194,11 +178,7 @@ async def on_message(message):
 
     msg_content = message.content.strip().lower()
     if msg_content in ["t!", "!t"]:
-        embed = discord.Embed(
-            title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ",
-            description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถาม:",
-            color=0xF1C40F
-        )
+        embed = discord.Embed(title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ", description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถาม:", color=0xF1C40F)
         await message.channel.send(embed=embed, view=LevelSelectView())
         return
 
@@ -207,4 +187,3 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
-    
