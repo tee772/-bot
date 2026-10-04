@@ -159,8 +159,8 @@ class LevelSelectView(discord.ui.View):
     async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B2")
 
-    # เพิ่มปุ่ม "รีบอทใหม่" ต่อจาก B2 โดยใช้ style=discord.ButtonStyle.yellow (สีเหลือง)
-    @discord.ui.button(label="รีบอทใหม่", style=discord.ButtonStyle.yellow)
+    # ปุ่ม "รีบอทใหม่" ใช้ ButtonStyle.secondary (สีเทา) ป้องกันปัญหา AttributeError
+    @discord.ui.button(label="รีบอทใหม่", style=discord.ButtonStyle.secondary)
     async def btn_reboot(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.message.delete()
         embed = discord.Embed(
