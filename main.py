@@ -9,26 +9,29 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
+# คลังสะสมคำศัพท์ที่ดึงจากเน็ตเบื้องหลัง
 WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
 USED_WORDS = set()
 
-# กำหนดเกณฑ์ความยาวของคำในแต่ละระดับ CEFR เพื่อดึงจาก API
-LEVEL_SPECS = {
-    "A0": {"min_len": 3, "max_len": 4, "topics": ["animal", "color", "food", "body"]},
-    "A1": {"min_len": 4, "max_len": 5, "topics": ["family", "school", "house", "time"]},
-    "A2": {"min_len": 5, "max_len": 7, "topics": ["travel", "weather", "nature", "work"]},
-    "B1": {"min_len": 6, "max_len": 9, "topics": ["business", "education", "health", "society"]},
-    "B2": {"min_len": 7, "max_len": 12, "topics": ["science", "technology", "politics", "economy"]}
+# กำหนดสเปกความยากและหัวข้อคำศัพท์ตามระดับ CEFR เพื่อให้ดึงคำตรงตามระดับ
+LEVEL_CONFIG = {
+    "A0": {"min_len": 3, "max_len": 4, "topics": ["cat", "dog", "sun", "red", "boy", "food"]},
+    "A1": {"min_len": 4, "max_len": 5, "topics": ["family", "school", "house", "water", "music"]},
+    "A2": {"min_len": 5, "max_len": 7, "topics": ["travel", "weather", "nature", "garden", "market"]},
+    "B1": {"min_len": 6, "max_len": 8, "topics": ["business", "education", "health", "society", "habit"]},
+    "B2": {"min_len": 7, "max_len": 10, "topics": ["strategy", "analysis", "science", "global", "system"]}
 }
 
-BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย", "การสื่อสาร", "ความรู้"]
+# คำแปลตัวเลือกหลอกสำรอง
+BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย", "ความรู้", "เทคโนโลยี"]
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    # เริ่มระบบสมองเบื้องหลังดึงคำจากเน็ตทันทีที่บอทออนไลน์
     asyncio.create_task(infinite_word_brain())
 
-# ดึงคำแปลภาษาไทยจาก Google Translate
+# แปลความหมายผ่าน Google Translate
 async def translate_in_context(session, word: str):
     url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
     try:
@@ -36,69 +39,67 @@ async def translate_in_context(session, word: str):
             if resp.status == 200:
                 data = await resp.json()
                 translated = data[0][0][0].strip()
-                # กรองไม่ให้เอาคำแปลที่เป็นภาษาอังกฤษ หรือแปลไม่ได้ความหมาย
+                # กรองคำแปลต้องเป็นภาษาไทย และไม่ใช่คำเดิม
                 if translated.lower() != word.lower() and len(translated) <= 25:
                     return translated
     except Exception:
         pass
     return None
 
-# ดึงคำศัพท์ภาษาอังกฤษใหม่ๆ จาก Datamuse API บนอินเทอร์เน็ต
-async def fetch_words_from_api(session, level: str):
-    spec = LEVEL_SPECS[level]
-    topic = random.choice(spec["topics"])
-    url = f"https://api.datamuse.com/words?topics={topic}&max=50"
+# สุ่มดึงคำศัพท์ภาษาอังกฤษใหม่ๆ จาก API อินเทอร์เน็ต
+async def fetch_random_net_words(session, level: str):
+    config = LEVEL_CONFIG[level]
+    topic = random.choice(config["topics"])
+    url = f"https://api.datamuse.com/words?topics={topic}&max=30"
     
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                valid_words = []
+                fetched_words = []
                 for item in data:
-                    word = item.get("word", "").upper()
-                    # กรองเอาเฉพาะตัวอักษร A-Z และความยาวตรงตามระดับ
-                    if word.isalpha() and spec["min_len"] <= len(word) <= spec["max_len"]:
-                        if word not in USED_WORDS:
-                            valid_words.append(word)
-                return valid_words
+                    w = item.get("word", "").upper()
+                    # เอาเฉพาะคำที่เป็นตัวอักษรภาษาอังกฤษล้วน และความยาวตรงระดับ
+                    if w.isalpha() and config["min_len"] <= len(w) <= config["max_len"]:
+                        if w not in USED_WORDS:
+                            fetched_words.append(w)
+                return fetched_words
     except Exception:
         pass
     return []
 
-# สร้างโจทย์ทายคำศัพท์
-async def generate_simple_quiz(session, level: str):
-    words = await fetch_words_from_api(session, level)
-    if not words:
-        return None
-        
-    random.shuffle(words)
-    for target_word in words:
-        thai_meaning = await translate_in_context(session, target_word.lower())
-        if thai_meaning:
-            fakes = [f for f in BACKUP_FAKES if f != thai_meaning]
-            selected_fakes = random.sample(fakes, 3)
-            choices = [thai_meaning] + selected_fakes
-            random.shuffle(choices)
-            
-            return {
-                "word": target_word,
-                "correct": thai_meaning,
-                "choices": choices
-            }
-    return None
-
-# สมองคัดกรองเบื้องหลัง ดึงคำศัพท์จากอินเทอร์เน็ตเข้ามาเติมใน Cache เรื่อยๆ ไม่จำกัด
+# ระบบพิเศษเบื้องหลัง: วนลูปดึงคำจากเน็ตมาเติมคลัง (WORD_CACHE) ตลอดเวลา
 async def infinite_word_brain():
-    print("🧠 สมองเบื้องหลังเริ่มทำงาน: กำลังเชื่อมต่ออินเทอร์เน็ตเพื่อดึงคำศัพท์ใหม่แบบไร้ขีดจำกัด...")
+    print("🧠 สมองเบื้องหลังเริ่มทำงาน: กำลังดึงและสะสมคำศัพท์จากอินเทอร์เน็ต...")
     async with aiohttp.ClientSession() as session:
         while True:
             for level in ["A0", "A1", "A2", "B1", "B2"]:
-                if len(WORD_CACHE[level]) < 5:
-                    quiz = await generate_simple_quiz(session, level)
-                    if quiz:
-                        WORD_CACHE[level].append(quiz)
-                        USED_WORDS.add(quiz["word"])
-            await asyncio.sleep(1.0)
+                # ถ้าคลังระดับไหนมีคำน้อยกว่า 10 คำ ให้ไปดึงจากเน็ตมาเติม
+                if len(WORD_CACHE[level]) < 10:
+                    net_words = await fetch_random_net_words(session, level)
+                    for target_word in net_words:
+                        if target_word in USED_WORDS:
+                            continue
+                            
+                        thai_meaning = await translate_in_context(session, target_word.lower())
+                        if thai_meaning:
+                            fakes = [f for f in BACKUP_FAKES if f != thai_meaning]
+                            selected_fakes = random.sample(fakes, 3)
+                            choices = [thai_meaning] + selected_fakes
+                            random.shuffle(choices)
+                            
+                            # บันทึกเข้าคลังสะสมของบอท
+                            WORD_CACHE[level].append({
+                                "word": target_word,
+                                "correct": thai_meaning,
+                                "choices": choices
+                            })
+                            USED_WORDS.add(target_word)
+                            
+                            # เติมได้ครบ 10 คำแล้วให้สลับไปทำระดับอื่น
+                            if len(WORD_CACHE[level]) >= 10:
+                                break
+            await asyncio.sleep(1.0) # พัก 1 วินาทีแล้ววนลูปทำงานต่อเบื้องหลัง
 
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
@@ -134,14 +135,15 @@ class LevelSelectView(discord.ui.View):
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
         await interaction.response.defer()
 
+        # ดึงคำศัพท์จากคลังเบื้องหลังที่สมองเตรียมไว้
         if WORD_CACHE[level]:
             quiz_data = WORD_CACHE[level].pop(0)
         else:
-            # สำรองข้อมูลฉุกเฉินกรณีเน็ตช้า
+            # กรณีคลังยังโหลดไม่ทันตอนเปิดบอทใหม่ๆ
             quiz_data = {
-                "word": "HAPPY",
-                "correct": "มีความสุข",
-                "choices": ["มีความสุข", "ครอบครัว", "การเดินทาง", "ประสบการณ์"]
+                "word": "WAITING",
+                "correct": "กำลังรอข้อมูล",
+                "choices": ["กำลังรอข้อมูล", "ครอบครัว", "การเดินทาง", "ประสบการณ์"]
             }
 
         embed = discord.Embed(
