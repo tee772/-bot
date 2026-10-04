@@ -9,31 +9,17 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# คลังคำศัพท์ความถี่สูง (Core High-Frequency Words by CEFR Level)
-FREQUENT_WORDS_DB = {
-    "A0": [
-        "cat", "dog", "sun", "red", "boy", "car", "pen", "hat", "cup", "run", 
-        "fan", "box", "sky", "sea", "bus", "day", "hot", "man", "map", "bed"
-    ],
-    "A1": [
-        "book", "milk", "fish", "home", "love", "tree", "bird", "food", "city", 
-        "park", "game", "time", "work", "rain", "cake", "door", "face", "girl", "help", "life"
-    ],
-    "A2": [
-        "travel", "weather", "garden", "market", "dinner", "family", "doctor", "summer", 
-        "winter", "friend", "school", "street", "person", "animal", "window", "answer", "chance", "change"
-    ],
-    "B1": [
-        "health", "education", "business", "society", "solution", "system", "action", 
-        "detail", "ability", "benefit", "company", "culture", "effort", "future", "nature", "policy"
-    ],
-    "B2": [
-        "strategy", "analysis", "science", "global", "theory", "method", "factor", 
-        "concept", "impact", "resource", "network", "challenge", "evidence", "process", "quality"
-    ]
+# ฐานคำศัพท์ความถี่สูงแยกตามระดับ CEFR สำหรับนำไปสุ่มคำที่เกี่ยวข้องกันจากอินเทอร์เน็ต
+FREQUENT_SEEDS = {
+    "A0": ["cat", "dog", "sun", "red", "boy", "car", "pen", "hat", "cup", "run", "fan", "box", "sky", "sea", "bus", "day", "hot", "man", "map", "bed"],
+    "A1": ["book", "milk", "fish", "home", "love", "tree", "bird", "food", "city", "park", "game", "time", "work", "rain", "cake", "door", "face", "girl", "help", "life"],
+    "A2": ["travel", "weather", "garden", "market", "dinner", "family", "doctor", "summer", "winter", "friend", "school", "street", "person", "animal", "window", "answer"],
+    "B1": ["health", "education", "business", "society", "solution", "system", "action", "detail", "ability", "benefit", "company", "culture", "effort", "future", "nature"],
+    "B2": ["strategy", "analysis", "science", "global", "theory", "method", "factor", "concept", "impact", "resource", "network", "challenge", "evidence", "process"]
 }
 
-WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
+# คลังคำศัพท์ที่ผ่านการดึงและแปลภาษาเสร็จสมบูรณ์แล้ว
+READY_WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
 USED_WORDS = set()
 
 BACKUP_FAKES = [
@@ -44,7 +30,7 @@ BACKUP_FAKES = [
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    print("🚀 เริ่มระบบคัดเลือกคำศัพท์ความถี่สูง และระบบดึงข้อมูลเบื้องหลังแบบเสถียร...")
+    print("🚀 เริ่มระบบดึงและเตรียมคำศัพท์ใหม่ล่วงหน้าตลอดเวลา (Background Infinite Stream)...")
     asyncio.create_task(background_word_fetcher())
 
 async def translate_in_context(session, word: str):
@@ -70,35 +56,34 @@ async def build_quiz_item(session, word: str):
         return {"word": word.upper(), "correct": thai_meaning, "choices": choices}
     return None
 
-# ระบบดึงคำศัพท์ที่เน้นคำใช้งานจริงของเจ้าของภาษา เติมคลังต่อเนื่อง
+# ระบบดึงคำศัพท์ใหม่จากอินเทอร์เน็ตล่วงหน้าตลอดเวลาแบบไม่หยุด
 async def background_word_fetcher():
     async with aiohttp.ClientSession() as session:
         while True:
-            for level, base_words in FREQUENT_WORDS_DB.items():
-                if len(WORD_CACHE[level]) < 50:
-                    target_word = random.choice(base_words)
-                    
-                    # คัดเลือกคำศัพท์ที่เกี่ยวข้องกันตามความถี่บริบทจาก Datamuse
-                    url = f"https://api.datamuse.com/words?ml={target_word}&max=30"
+            for level, seeds in FREQUENT_SEEDS.items():
+                if len(READY_WORD_CACHE[level]) < 100:
+                    seed = random.choice(seeds)
+                    url = f"https://api.datamuse.com/words?ml={seed}&max=30"
                     try:
                         async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
-                                candidates = [target_word] + [item.get("word", "") for item in data]
+                                candidates = [seed] + [item.get("word", "") for item in data]
                                 random.shuffle(candidates)
                                 
                                 for candidate in candidates:
                                     w = candidate.upper()
                                     if w.isalpha() and w not in USED_WORDS and len(w) >= 3:
+                                        # ทำการดึงคำแปลเตรียมไว้ล่วงหน้าให้เสร็จสิ้นก่อนเก็บลงคลัง
                                         quiz = await build_quiz_item(session, w)
                                         if quiz:
-                                            WORD_CACHE[level].append(quiz)
+                                            READY_WORD_CACHE[level].append(quiz)
                                             USED_WORDS.add(w)
-                                            print(f"🔄 [HIGH-FREQ STREAM] เติมคำศัพท์จริง ({level}): {w} (มีในคลัง {len(WORD_CACHE[level])} คำ)")
+                                            print(f"✅ [LOADED & READY] ({level}): {w} | ในคลังพร้อมใช้: {len(READY_WORD_CACHE[level])} คำ")
                                             await asyncio.sleep(0.1)
                                             break
                     except Exception as e:
-                        print(f"⚠️ API Connection Note ({level}): {e}")
+                        print(f"⚠️ Fetch Note ({level}): {e}")
 
             await asyncio.sleep(0.2)
 
@@ -141,34 +126,36 @@ class LevelSelectView(discord.ui.View):
         super().__init__(timeout=120)
 
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
-        # รับมือกับการกดปุ่มรัวๆ ของ Discord
         try:
             if not interaction.response.is_done():
                 await interaction.response.defer()
         except Exception:
             pass
 
-        # ดึงจาก Cache หลัก หากยังไม่มีให้ดึงคำจากฐานคำศัพท์ความถี่สูงโดยตรง
-        if WORD_CACHE[level]:
-            quiz_data = WORD_CACHE[level].pop(0)
+        # ดึงเฉพาะคำศัพท์ที่โหลดและเตรียมโจทย์เสร็จสมบูรณ์แล้วเท่านั้น
+        if READY_WORD_CACHE[level]:
+            quiz_data = READY_WORD_CACHE[level].pop(0)
+            
+            embed = discord.Embed(
+                title=f"🎯 ทายคำศัพท์ระดับ {level}",
+                description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยคือข้อใด?:",
+                color=0x3498DB
+            )
+            
+            try:
+                await interaction.followup.send(embed=embed, view=QuizChoiceView(quiz_data["correct"], quiz_data["choices"]))
+            except Exception:
+                pass
         else:
-            fallback_word = random.choice(FREQUENT_WORDS_DB[level]).upper()
-            quiz_data = {
-                "word": fallback_word,
-                "correct": "ความหมายภาษาไทย",
-                "choices": ["ความหมายภาษาไทย", "ตัวเลือกสำรอง 1", "ตัวเลือกสำรอง 2", "ตัวเลือกสำรอง 3"]
-            }
-
-        embed = discord.Embed(
-            title=f"🎯 ทายคำศัพท์ระดับ {level}",
-            description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยคือข้อใด?:",
-            color=0x3498DB
-        )
-
-        try:
-            await interaction.followup.send(embed=embed, view=QuizChoiceView(quiz_data["correct"], quiz_data["choices"]))
-        except Exception:
-            pass
+            embed = discord.Embed(
+                title="⏳ กำลังเตรียมคำศัพท์ใหม่...",
+                description=f"คำศัพท์ระดับ **{level}** กำลังถูกโหลดและประมวลผลแปลภาษาจากอินเทอร์เน็ต\n\n**กรุณากดปุ่มอีกครั้งใน 1-2 วินาทีครับ**",
+                color=0xE67E22
+            )
+            try:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(label="A0 (ง่ายมาก)", style=discord.ButtonStyle.primary)
     async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -229,3 +216,4 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
+    
