@@ -9,25 +9,45 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# คลังสะสมคำศัพท์แยกตามระดับ
 WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
 USED_WORDS = set()
 
-# คลังคำศัพท์ภาษาอังกฤษแท้ตามระดับ CEFR (สำรองกรณีดึง API ไม่ทัน)
-BASE_VOCAB = {
-    "A0": ["CAT", "DOG", "SUN", "BOY", "GIRL", "BOOK", "PEN", "FISH", "MILK", "CAR", "TREE", "BIRD", "WATER", "FOOD", "HAND", "RED", "BLUE", "BIG", "RUN", "WALK"],
-    "A1": ["HAPPY", "FAMILY", "SCHOOL", "FRIEND", "HOUSE", "ANIMAL", "APPLE", "DRINK", "MUSIC", "MONEY", "PHONE", "TIME", "DOCTOR", "MOTHER", "FATHER", "CLEAN", "EARLY", "TODAY"],
-    "A2": ["TRAVEL", "WEATHER", "HOLIDAY", "SUNDAY", "FUTURE", "HEALTH", "PICTURE", "SUMMER", "WINTER", "LUNCH", "DINNER", "FARMER", "GARDEN", "KITCHEN", "MARKET", "BEAUTIFUL", "CAREFUL"],
-    "B1": ["SUCCESS", "BUSINESS", "EXPERIENCE", "KNOWLEDGE", "EDUCATION", "OPINION", "DECISION", "PROGRESS", "PROBLEM", "SOLUTION", "COMMUNITY", "CREATIVE", "HABIT", "FEELING", "SOCIETY", "IMPROVE"],
-    "B2": ["STRATEGY", "RESOURCE", "ANALYSIS", "CAPACITY", "CHALLENGE", "CRITICAL", "EVIDENCE", "GLOBAL", "IDENTITY", "OBJECTIVE", "STABILITY", "STRUCTURE", "PERSPECTIVE", "TRANSFORM"]
+# ตั้งค่าเกณฑ์ความยาก ความยาว และค่าความถี่การใช้คำ (Frequency) ให้ตรงตาม CEFR
+LEVEL_CONFIG = {
+    "A0": {
+        "min_len": 2, "max_len": 4, 
+        "min_freq": 20.0,  # บังคับเฉพาะคำที่ใช้บ่อยมากๆ ในภาษาอังกฤษ
+        "topics": ["cat", "dog", "red", "boy", "sun", "car", "pen", "hat", "cup", "run"]
+    },
+    "A1": {
+        "min_len": 4, "max_len": 5, 
+        "min_freq": 10.0,  # คำพื้นฐานระดับต้น
+        "topics": ["book", "milk", "fish", "home", "love", "tree", "bird", "food", "city", "park"]
+    },
+    "A2": {
+        "min_len": 5, "max_len": 7, 
+        "min_freq": 4.0, 
+        "topics": ["travel", "weather", "garden", "market", "dinner", "family"]
+    },
+    "B1": {
+        "min_len": 6, "max_len": 8, 
+        "min_freq": 1.0, 
+        "topics": ["health", "education", "business", "society", "solution"]
+    },
+    "B2": {
+        "min_len": 7, "max_len": 10, 
+        "min_freq": 0.1, 
+        "topics": ["strategy", "analysis", "science", "global", "system"]
+    }
 }
 
-LEVEL_CONFIG = {
-    "A0": {"min_len": 3, "max_len": 4, "seeds": ["cat", "dog", "sun", "red", "boy", "pen", "hat", "cup"]},
-    "A1": {"min_len": 4, "max_len": 5, "seeds": ["love", "home", "city", "park", "food", "game", "time", "work"]},
-    "A2": {"min_len": 5, "max_len": 7, "seeds": ["travel", "nature", "garden", "market", "dinner", "person", "system"]},
-    "B1": {"min_len": 6, "max_len": 8, "seeds": ["nature", "health", "action", "detail", "effort", "market", "policy"]},
-    "B2": {"min_len": 7, "max_len": 10, "seeds": ["theory", "method", "system", "factor", "growth", "energy", "future"]}
+# คลังคำง่ายการันตีความถูกต้อง (สำรองชั้นสุดท้าย)
+BASE_VOCAB = {
+    "A0": ["CAT", "DOG", "SUN", "BOY", "GIRL", "PEN", "CAR", "RED", "BLUE", "BIG", "RUN", "HOT", "BED", "BOX", "CUP"],
+    "A1": ["BOOK", "FISH", "MILK", "TREE", "BIRD", "FOOD", "HAND", "HOME", "LOVE", "WALK", "PARK", "GAME", "TIME", "WORK"],
+    "A2": ["TRAVEL", "WEATHER", "HOLIDAY", "SUNDAY", "FUTURE", "HEALTH", "PICTURE", "SUMMER", "WINTER", "GARDEN", "MARKET"],
+    "B1": ["SUCCESS", "BUSINESS", "EXPERIENCE", "KNOWLEDGE", "EDUCATION", "OPINION", "DECISION", "PROGRESS", "PROBLEM"],
+    "B2": ["STRATEGY", "RESOURCE", "ANALYSIS", "CAPACITY", "CHALLENGE", "CRITICAL", "EVIDENCE", "GLOBAL", "IDENTITY"]
 }
 
 BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย", "ความรู้", "เทคโนโลยี"]
@@ -35,10 +55,9 @@ BACKUP_FAKES = ["ความรู้สึก", "การเดินทา�
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    # เริ่มทำงานระบบเบื้องหลังเติมคำศัพท์เข้า Cache
     asyncio.create_task(background_word_fetcher())
 
-# แปลความหมายภาษาไทยผ่าน Google Translate
+# แปลความหมายผ่าน Google Translate
 async def translate_in_context(session, word: str):
     url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
     try:
@@ -52,7 +71,6 @@ async def translate_in_context(session, word: str):
         pass
     return None
 
-# สร้างข้อสอบ 1 ข้อ
 async def build_quiz_item(session, word: str):
     thai_meaning = await translate_in_context(session, word.lower())
     if thai_meaning:
@@ -63,26 +81,40 @@ async def build_quiz_item(session, word: str):
         return {"word": word, "correct": thai_meaning, "choices": choices}
     return None
 
-# ระบบเบื้องหลัง: เติมคำศัพท์ล่วงหน้าเข้า Cache 24 ชั่วโมง
+# สกัดค่า Word Frequency จาก API ของ Datamuse
+def extract_frequency(tags):
+    for tag in tags:
+        if tag.startswith("f:"):
+            try:
+                return float(tag[2:])
+            except ValueError:
+                return 0.0
+    return 0.0
+
+# ระบบเบื้องหลัง: สั่ง API ให้กรองคำยากออกตามค่า Frequency และความยาวคำ
 async def background_word_fetcher():
-    print("🧠 เริ่มต้นระบบเตรียมคำศัพท์เบื้องหลัง...")
+    print("🧠 สมองเบื้องหลังเริ่มทำงาน: กรองเฉพาะคำง่ายตรงตามระดับจาก API...")
     async with aiohttp.ClientSession() as session:
         while True:
             for level in ["A0", "A1", "A2", "B1", "B2"]:
-                # คงจำนวนคำศัพท์ใน Cache ไว้อย่างน้อย 5-10 คำต่อระดับเสมอ
                 if len(WORD_CACHE[level]) < 8:
                     config = LEVEL_CONFIG[level]
-                    seed = random.choice(config["seeds"])
-                    url = f"https://api.datamuse.com/words?ml={seed}&max=30"
+                    topic = random.choice(config["topics"])
+                    # md=f บอก API ให้ส่งค่า Frequency ความฮิตของคำกลับมาด้วย
+                    url = f"https://api.datamuse.com/words?topics={topic}&md=f&max=60"
                     
                     try:
-                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 random.shuffle(data)
                                 for item in data:
                                     w = item.get("word", "").upper()
-                                    if w.isalpha() and config["min_len"] <= len(w) <= config["max_len"]:
+                                    tags = item.get("tags", [])
+                                    freq = extract_frequency(tags)
+
+                                    # กรองระดับ API: 1. เป็นตัวอักษรล้วน 2. ความยาวตรงระดับ 3. ค่าความฮิต (Frequency) ต้องสูงตามเกณฑ์
+                                    if w.isalpha() and config["min_len"] <= len(w) <= config["max_len"] and freq >= config["min_freq"]:
                                         if w not in USED_WORDS:
                                             quiz = await build_quiz_item(session, w)
                                             if quiz:
@@ -93,7 +125,7 @@ async def background_word_fetcher():
                     except Exception:
                         pass
 
-                    # ถ้าดึง API ไม่ได้ ให้ดึงคำจริงจาก BASE_VOCAB เติมใส่ Cache สำรองไว้
+                    # หาก API ดึงคำมาไม่ทัน ให้ดึงคลังคำพื้นฐานการันตีมาใช้งาน
                     if len(WORD_CACHE[level]) < 3:
                         pool = [w for w in BASE_VOCAB[level] if w not in USED_WORDS]
                         if not pool:
@@ -138,19 +170,16 @@ class LevelSelectView(discord.ui.View):
         super().__init__(timeout=120)
 
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
-        # 1. ตอบรับ Interaction ทันที
         await interaction.response.defer()
 
-        # 2. ดึงจาก Cache ทันที (ใช้เวลา 0.001 วินาที ไม่มีวันค้างหรือ Timeout)
         if WORD_CACHE[level]:
             quiz_data = WORD_CACHE[level].pop(0)
         else:
-            # กรณี Cache ว่างจริงๆ สุ่มคำศัพท์แท้ทันที
             word = random.choice(BASE_VOCAB[level])
             quiz_data = {
                 "word": word,
-                "correct": "แปลภาษา",
-                "choices": ["แปลภาษา", "ครอบครัว", "การเดินทาง", "ประสบการณ์"]
+                "correct": "คำศัพท์พื้นฐาน",
+                "choices": ["คำศัพท์พื้นฐาน", "ครอบครัว", "การเดินทาง", "ประสบการณ์"]
             }
 
         embed = discord.Embed(
@@ -181,16 +210,15 @@ class LevelSelectView(discord.ui.View):
     async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B2")
 
-    @discord.ui.button(label="รีบอทใหม่", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="🔄 เริ่มเกมใหม่ / รีบอท", style=discord.ButtonStyle.danger)
     async def btn_reboot(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        await interaction.message.delete()
         embed = discord.Embed(
             title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ (คำศัพท์ใช้งานจริง)", 
-            description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถามง่ายๆ ได้เลยครับ:", 
+            description="เลือกระดับความยากด้านล่างเพื่อเริ่มทายคำศัพท์ได้เลยครับ:", 
             color=0xF1C40F
         )
-        await interaction.channel.send(embed=embed, view=LevelSelectView())
+        await interaction.followup.send(embed=embed, view=LevelSelectView())
 
 @bot.event
 async def on_message(message):
