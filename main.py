@@ -40,7 +40,7 @@ BACKUP_FAKES = ["ความรู้สึก", "การเดินทา�
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    print("🚀 กำลังเริ่มดึงคำศัพท์จากอินเทอร์เน็ตเข้าคลัง...")
+    print("🚀 เริ่มระบบดึงคำศัพท์จากอินเทอร์เน็ตแบบต่อเนื่องไร้ขีดจำกัด (Infinite Loader)...")
     asyncio.create_task(background_word_fetcher())
 
 async def translate_in_context(session, word: str):
@@ -66,16 +66,18 @@ async def build_quiz_item(session, word: str):
         return {"word": word, "correct": thai_meaning, "choices": choices}
     return None
 
+# ระบบดึงคำศัพท์เบื้องหลังแบบทำงานต่อเนื่องตลอดเวลา (Infinite Stream)
 async def background_word_fetcher():
     async with aiohttp.ClientSession() as session:
         while True:
             for level in ["A0", "A1", "A2", "B1", "B2"]:
-                if len(WORD_CACHE[level]) < 10:
+                # สะสมคำศัพท์ไปเรื่อยๆ จนกว่าคลังระดับนั้นๆ จะมีถึง 200 คำ (กดรัวอย่างไรก็ไม่มีวันหมด)
+                if len(WORD_CACHE[level]) < 200:
                     config = LEVEL_CONFIG[level]
                     topic = random.choice(config["topics"])
                     pattern = random.choice(config["patterns"])
                     
-                    url = f"https://api.datamuse.com/words?ml={topic}&sp={pattern}&max=40"
+                    url = f"https://api.datamuse.com/words?ml={topic}&sp={pattern}&max=50"
                     
                     try:
                         async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
@@ -89,13 +91,14 @@ async def background_word_fetcher():
                                         if quiz:
                                             WORD_CACHE[level].append(quiz)
                                             USED_WORDS.add(w)
-                                            print(f"✅ [API NET] โหลดคำใหม่สำเร็จ ({level}): {w} -> {quiz['correct']} (คลังสะสมแล้ว {len(WORD_CACHE[level])} คำ)")
-                                            if len(WORD_CACHE[level]) >= 10:
-                                                break
+                                            print(f"🔄 [NET STREAM] เติมคำสะสมต่อเนื่อง ({level}): {w} (ในคลังมี {len(WORD_CACHE[level])} คำ)")
+                                            # เว้นจังหวะสั้นๆ เพื่อไม่ให้ยิง API ถี่เกินไป
+                                            await asyncio.sleep(0.1)
                     except Exception as e:
-                        print(f"⚠️ API Error ({level}): {e}")
+                        print(f"⚠️ API Connection Note ({level}): {e}")
 
-            await asyncio.sleep(0.5)
+            # พักรอบสั้นมาก (0.2 วินาที) เพื่อรันลูปเติมคำศัพท์จากเน็ตไม่หยุด
+            await asyncio.sleep(0.2)
 
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
@@ -112,7 +115,7 @@ class QuizChoiceView(discord.ui.View):
             try:
                 await interaction.response.defer()
             except discord.NotFound:
-                return  # ถ้า Interaction หมดอายุไปแล้วให้ข้ามทันที ป้องกัน Error ล่ม
+                return
 
             if choice == self.correct_answer:
                 embed = discord.Embed(title="🎉 ถูกต้องครับ!", description=f"คำตอบคือ:\n**{choice}**", color=0x2ECC71)
@@ -138,7 +141,7 @@ class LevelSelectView(discord.ui.View):
         try:
             await interaction.response.defer()
         except discord.NotFound:
-            return  # ข้ามกรณี Interaction หมดอายุ
+            return
 
         if WORD_CACHE[level]:
             quiz_data = WORD_CACHE[level].pop(0)
@@ -180,18 +183,19 @@ class LevelSelectView(discord.ui.View):
     async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B2")
 
-    @discord.ui.button(label="🔄 เริ่มเกมใหม่ / รีบอท", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="🔄 รีบอทเริ่มใหม่ (!t)", style=discord.ButtonStyle.danger)
     async def btn_reboot(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            await interaction.response.defer()
-            embed = discord.Embed(
-                title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ (คำศัพท์ใช้งานจริง)", 
-                description="เลือกระดับความยากด้านล่างเพื่อเริ่มทายคำศัพท์ได้เลยครับ:", 
-                color=0xF1C40F
-            )
-            await interaction.followup.send(embed=embed, view=LevelSelectView())
-        except discord.NotFound:
+            await interaction.message.delete()
+        except Exception:
             pass
+
+        embed = discord.Embed(
+            title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ (คำศัพท์ใช้งานจริง)", 
+            description="เลือกระดับความยากด้านล่างเพื่อเริ่มทายคำศัพท์ได้เลยครับ:", 
+            color=0xF1C40F
+        )
+        await interaction.channel.send(embed=embed, view=LevelSelectView())
 
 @bot.event
 async def on_message(message):
@@ -209,3 +213,4 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
+    
