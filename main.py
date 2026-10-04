@@ -9,41 +9,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# ตัวอย่างรายการคำศัพท์เรียงตามความถี่จากอันดับ 1 เป็นต้นไป (Top Most Frequent Words)
-# เมื่อรันจริง Background Task จะทยอยสุ่มและดึงคำตามช่วงความถี่เพื่อความหลากหลาย
-TOP_5000_VOCAB = {
-    "A0": [
-        "the", "be", "to", "of", "and", "a", "in", "that", "have", "i", "it", "for", "not", "on", "with",
-        "he", "as", "you", "do", "at", "this", "but", "his", "by", "from", "they", "we", "say", "her", "she",
-        "or", "an", "will", "my", "one", "all", "would", "there", "their", "what", "so", "up", "out", "if",
-        "about", "who", "get", "which", "go", "me", "when", "make", "can", "like", "time", "no", "just", "him",
-        "know", "take", "people", "into", "year", "your", "good", "some", "could", "them", "see", "other", "than",
-        "then", "now", "look", "only", "come", "its", "over", "think", "also", "back", "after", "use", "two", "how"
-    ],
-    "A1": [
-        "work", "first", "well", "way", "even", "new", "want", "because", "any", "these", "give", "day", "most",
-        "us", "great", "between", "need", "large", "home", "big", "give", "air", "small", "number", "always",
-        "place", "world", "life", "hand", "part", "child", "eye", "woman", "place", "work", "week", "case", "point",
-        "company", "water", "room", "mother", "area", "money", "story", "fact", "month", "lot", "right", "study",
-        "book", "eye", "job", "word", "business", "issue", "side", "kind", "head", "house", "service", "friend"
-    ],
-    "A2": [
-        "market", "guide", "health", "school", "system", "program", "question", "during", "government", "important",
-        "family", "power", "problem", "court", "office", "social", "national", "student", "country", "member",
-        "police", "project", "person", "history", "party", "result", "change", "reason", "research", "girl",
-        "moment", "teacher", "force", "education", "foreign", "nature", "decision", "society", "season", "camera"
-    ],
-    "B1": [
-        "strategy", "analysis", "economy", "investment", "technology", "resource", "solution", "benefit", "challenge",
-        "culture", "security", "impact", "evidence", "authority", "evidence", "factor", "concept", "structure",
-        "performance", "management", "financial", "production", "behavior", "consumer", "environmental", "opportunity"
-    ],
-    "B2": [
-        "perspective", "hypothesis", "infrastructure", "subsequent", "implementation", "methodology", "phenomenon",
-        "legislation", "framework", "sustainable", "fundamental", "interpretation", "comprehensive", "significance"
-    ]
-}
+# แหล่งที่มาไฟล์ Top 5,000 คำศัพท์ภาษาอังกฤษใช้บ่อยที่สุดเรียงตามลำดับความถี่
+WORDLIST_URL = "https://raw.githubusercontent.com/david47k/top-english-wordlists/master/top_english_words_lower_10000.txt"
 
+FETCHED_5000_WORDS = []
 UNCATEGORIZED_CACHE = []
 USED_WORDS = set()
 
@@ -55,8 +24,42 @@ BACKUP_FAKES = [
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    print("🚀 เริ่มระบบดึงคำศัพท์เรียงตามความถี่ Top 5,000 Most Frequent Words...")
+    print("🌐 กำลังเริ่มดาวน์โหลดไฟล์ 5,000 คำศัพท์ใช้บ่อยที่สุดจากอินเทอร์เน็ต...")
+    
+    async with aiohttp.ClientSession() as session:
+        await fetch_top_words_from_internet(session)
+        
+    print("🚀 เริ่มระบบคัดแยกคำศัพท์และสร้างคลังคำถามล่วงหน้า...")
     asyncio.create_task(background_word_fetcher())
+
+# ฟังก์ชันดึงไฟล์ Top 5,000 คำศัพท์จากอินเทอร์เน็ต
+async def fetch_top_words_from_internet(session):
+    global FETCHED_5000_WORDS
+    try:
+        async with session.get(WORDLIST_URL, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
+            if resp.status == 200:
+                text = await resp.text()
+                lines = [line.strip() for line in text.splitlines() if line.strip().isalpha()]
+                # กรองคำสั้นเกินไปออก แล้วตัดเอาเฉพาะ Top 5,000 คำแรกที่ใช้บ่อยที่สุด
+                FETCHED_5000_WORDS = [w for w in lines if len(w) >= 2][:5000]
+                print(f"✅ โหลดคำศัพท์ Top 5,000 คำจากอินเทอร์เน็ตสำเร็จ! (ได้ทั้งหมด {len(FETCHED_5000_WORDS)} คำ)")
+            else:
+                print(f"⚠️ ไม่สามารถดึงไฟล์คำศัพท์ได้ HTTP Code: {resp.status}")
+    except Exception as e:
+        print(f"⚠️ เกิดข้อผิดพลาดในการโหลดไฟล์คำศัพท์จากอินเทอร์เน็ต: {e}")
+
+# แบ่งช่วงระดับจากสถิติความถี่คำศัพท์ Top 5000
+def get_level_by_rank(index):
+    if index < 300:
+        return "A0"
+    elif index < 1000:
+        return "A1"
+    elif index < 2000:
+        return "A2"
+    elif index < 3500:
+        return "B1"
+    else:
+        return "B2"
 
 async def translate_in_context(session, word: str):
     url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
@@ -86,25 +89,46 @@ async def build_quiz_item(session, word: str, level: str):
         }
     return None
 
+# สตรีมดึงคำแปลมารวมเป็นคลังคำถามล่วงหน้าก่อนผู้เล่นจะกดเล่น
 async def background_word_fetcher():
     async with aiohttp.ClientSession() as session:
         while True:
+            # รอให้ไฟล์ Top 5000 โหลดเสร็จเรียบร้อยก่อน
+            if not FETCHED_5000_WORDS:
+                await asyncio.sleep(1.0)
+                continue
+
             if len(UNCATEGORIZED_CACHE) < 200:
+                # สุ่มเลือกระดับความยาก
                 target_level = random.choice(["A0", "A1", "A2", "B1", "B2"])
-                word_candidates = TOP_5000_VOCAB[target_level]
                 
-                # สุ่มเลือกคำศัพท์เรียงจากลำดับความถี่
-                random.shuffle(word_candidates)
-                for w in word_candidates:
-                    w_upper = w.upper()
-                    if w_upper.isalpha() and w_upper not in USED_WORDS and len(w_upper) >= 2:
-                        quiz = await build_quiz_item(session, w_upper, target_level)
-                        if quiz:
-                            UNCATEGORIZED_CACHE.append(quiz)
-                            USED_WORDS.add(w_upper)
-                            print(f"✅ [TOP 5000 LOADED] {w_upper} ({target_level}) | คลังรวม: {len(UNCATEGORIZED_CACHE)} คำ")
-                            await asyncio.sleep(0.1)
-                            break
+                # คัดเอาเฉพาะคำศัพท์ใน Top 5,000 ที่อยู่ในช่วงระดับนั้นๆ
+                candidates = [
+                    (idx, word) for idx, word in enumerate(FETCHED_5000_WORDS) 
+                    if get_level_by_rank(idx) == target_level and word.upper() not in USED_WORDS
+                ]
+                
+                # หากเล่นจนครบคำศัพท์ในระดับนั้นแล้ว ให้ล้างประวัติเพื่อสุ่มวนใหม่
+                if not candidates:
+                    print(f"🔄 เล่นครบคำศัพท์ระดับ {target_level} ใน Top 5,000 แล้ว! กำลังรีเซ็ตเพื่อสุ่มวนใหม่...")
+                    for idx, word in enumerate(FETCHED_5000_WORDS):
+                        if get_level_by_rank(idx) == target_level:
+                            USED_WORDS.discard(word.upper())
+                    candidates = [
+                        (idx, word) for idx, word in enumerate(FETCHED_5000_WORDS) 
+                        if get_level_by_rank(idx) == target_level
+                    ]
+
+                random.shuffle(candidates)
+                for idx, word in candidates:
+                    w_upper = word.upper()
+                    quiz = await build_quiz_item(session, w_upper, target_level)
+                    if quiz:
+                        UNCATEGORIZED_CACHE.append(quiz)
+                        USED_WORDS.add(w_upper)
+                        print(f"✅ [LOADED FROM INTERNET] {w_upper} (อันดับที่ {idx+1} | ระดับ {target_level}) | คลังรวม: {len(UNCATEGORIZED_CACHE)} คำ")
+                        await asyncio.sleep(0.1)
+                        break
 
             await asyncio.sleep(0.2)
 
@@ -118,6 +142,7 @@ def match_word_for_level(level: str):
             
     return UNCATEGORIZED_CACHE.pop(0)
 
+# ฟังก์ชันรีเซ็ตและส่งเมนูหลักใหม่เมื่อเกิด Error หรือ Timeout
 async def reset_to_main_menu(channel, old_message=None):
     if old_message:
         try:
@@ -252,4 +277,3 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
-    
