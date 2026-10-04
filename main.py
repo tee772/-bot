@@ -9,16 +9,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# กำหนดช่วงความถี่คำศัพท์ (Frequency Score) ตามระดับความยาก A0 - B2
-# ค่า f ยิ่งสูง = คำศัพท์ยิ่งพื้นฐาน/ง่าย
-LEVEL_FREQ_MAP = {
-    "A0": (100.0, 500.0), # คำพื้นฐานที่สุดในชีวิตประจำวัน
-    "A1": (30.0, 99.9),
-    "A2": (10.0, 29.9),
-    "B1": (3.0, 9.9),
-    "B2": (1.0, 2.9)      # คำศัพท์เฉพาะหรือซับซ้อนขึ้น
-}
-
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
@@ -29,51 +19,39 @@ async def on_command_error(ctx, error):
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-# 1. Generate สุ่มคำศัพท์ภาษาอังกฤษที่ตรงตามระดับความยากจาก Datamuse API
-async def fetch_word_by_level(level: str):
-    min_f, max_f = LEVEL_FREQ_MAP.get(level, (10.0, 30.0))
-    # สุ่มอักษรตัวแรกเพื่อให้ได้คำศัพท์ที่หลากหลาย
-    random_letter = random.choice("abcdefghijklmnopqrstuvwxyz")
-    url = f"https://api.datamuse.com/words?sp={random_letter}*&md=f&max=100"
+# ดึงคำศัพท์ภาษาอังกฤษที่เน้นคำใช้จริงในชีวิตประจำวันผ่าน Datamuse Vocabulary API
+async def fetch_common_word(level: str):
+    # กำหนดหัวข้อ/หมวดหมู่คำศัพท์ที่พบบ่อยตามระดับ
+    topics = {
+        "A0": ["family", "color", "animal", "number", "food"],
+        "A1": ["home", "school", "clothes", "time", "body"],
+        "A2": ["travel", "weather", "work", "hobby", "health"],
+        "B1": ["business", "feeling", "society", "nature", "media"],
+        "B2": ["science", "culture", "opinion", "process", "system"]
+    }
     
-    timeout = aiohttp.ClientTimeout(total=4)
+    topic = random.choice(topics.get(level, topics["A1"]))
+    url = f"https://api.datamuse.com/words?topics={topic}&max=40"
+    
+    timeout = aiohttp.ClientTimeout(total=3)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    valid_words = []
-                    for item in data:
-                        word = item.get("word", "")
-                        # คัดเฉพาะคำศัพท์เดี่ยวที่เป็นตัวอักษรบริสุทธิ์
-                        if word.isalpha() and 2 < len(word) < 12:
-                            tags = item.get("tags", [])
-                            for tag in tags:
-                                if tag.startswith("f:"):
-                                    try:
-                                        score = float(tag.split(":")[1])
-                                        if min_f <= score <= max_f:
-                                            valid_words.append(word)
-                                    except ValueError:
-                                        pass
-                    if valid_words:
-                        return random.choice(valid_words)
+                    # คัดเฉพาะคำศัพท์ยาว 3-8 ตัวอักษรที่ไม่ซับซ้อนเกินไป
+                    filtered = [
+                        item["word"] for item in data 
+                        if item["word"].isalpha() and 3 <= len(item["word"]) <= 8
+                    ]
+                    if filtered:
+                        return random.choice(filtered)
     except Exception:
         pass
-    
-    # หากสุ่มสัญลักษณ์ตัวอักษรแล้วไม่พบ ให้ใช้ API สุ่มคำทั่วไปแทน
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get("https://random-word-api.herokuapp.com/word") as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data[0]
-    except Exception:
-        pass
-    return "example"
+    return "water"
 
-# 2. Generate คำแปลภาษาไทยสดๆ ผ่าน Translation API
-async def translate_to_thai(word: str):
+# แปลคำศัพท์เป็นภาษาไทย และขัดเกลาคำแปลให้อ่านง่าย
+async def fetch_clean_thai_translation(word: str):
     url = f"https://api.mymemory.translated.net/get?q={word}&langpair=en|th"
     timeout = aiohttp.ClientTimeout(total=3)
     try:
@@ -81,12 +59,14 @@ async def translate_to_thai(word: str):
             async with session.get(url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    translation = data['responseData']['translatedText']
-                    if translation.lower() != word.lower():
-                        return translation
+                    raw_text = data['responseData']['translatedText'].strip()
+                    # คัดแยกเฉพาะคำแรกหากมีเครื่องหมายจุลภาค หรือตัดคำแปลกๆ ออก
+                    clean_text = raw_text.split(',')[0].split(';')[0].strip()
+                    if clean_text.lower() != word.lower() and len(clean_text) < 30:
+                        return clean_text
     except Exception:
         pass
-    return f"คำแปลของ {word}"
+    return "น้ำ"
 
 # View ปุ่มตอบคำถาม 4 ช้อยส์
 class QuizChoiceView(discord.ui.View):
@@ -131,7 +111,7 @@ class QuizChoiceView(discord.ui.View):
             await interaction.followup.send(embeds=[embed, next_embed], view=LevelSelectView())
         return callback
 
-# View สำหรับเลือกระดับความยาก (A0 - B2)
+# View เลือกระดับความยาก (A0 - B2)
 class LevelSelectView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=120)
@@ -139,25 +119,23 @@ class LevelSelectView(discord.ui.View):
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
         await interaction.response.defer()
 
-        # 1. Generate สุ่มคำศัพท์หลัก และคำศัพท์หลอก 3 คำตรงตามระดับที่กดทันที
-        target_word = await fetch_word_by_level(level)
-        fake_word1 = await fetch_word_by_level(level)
-        fake_word2 = await fetch_word_by_level(level)
-        fake_word3 = await fetch_word_by_level(level)
+        # 1. สุ่มคำศัพท์หลักและคำศัพท์หลอก 3 คำจากหมวดหมู่ตามระดับ
+        target_word = await fetch_common_word(level)
+        fake_word1 = await fetch_common_word(level)
+        fake_word2 = await fetch_common_word(level)
+        fake_word3 = await fetch_common_word(level)
 
-        # 2. Generate แปลคำศัพท์ทั้งหมดเป็นภาษาไทยสดๆ จาก API
-        correct_th = await translate_to_thai(target_word)
-        fake_th1 = await translate_to_thai(fake_word1)
-        fake_th2 = await translate_to_thai(fake_word2)
-        fake_th3 = await translate_to_thai(fake_word3)
+        # 2. แปลเป็นภาษาไทยพร้อมขัดเกลาคำแปล
+        correct_th = await fetch_clean_thai_translation(target_word)
+        fake_th1 = await fetch_clean_thai_translation(fake_word1)
+        fake_th2 = await fetch_clean_thai_translation(fake_word2)
+        fake_th3 = await fetch_clean_thai_translation(fake_word3)
 
         # 3. รวบรวมตัวเลือกและป้องกันตัวเลือกซ้ำกัน
         choices_set = {correct_th, fake_th1, fake_th2, fake_th3}
-        
-        # หากได้คำแปลซ้ำกัน ให้ดึงคำศัพท์ใหม่มาแปลเติมจนครบ 4 ช้อยส์
         while len(choices_set) < 4:
-            extra_word = await fetch_word_by_level(level)
-            extra_th = await translate_to_thai(extra_word)
+            extra_word = await fetch_common_word(level)
+            extra_th = await fetch_clean_thai_translation(extra_word)
             choices_set.add(extra_th)
 
         choices = list(choices_set)
@@ -168,7 +146,6 @@ class LevelSelectView(discord.ui.View):
             description=f"คำศัพท์: **{target_word.upper()}**\n\nคำแปลภาษาไทยของคำนี้คือข้อใด?:",
             color=0x3498DB
         )
-        embed.set_footer(text="คำศัพท์และคำแปลถูก Generate สดๆ จาก API ตรงตามระดับความยาก")
 
         await interaction.followup.send(embed=embed, view=QuizChoiceView(correct_th, choices))
 
