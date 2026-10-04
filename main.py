@@ -9,8 +9,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# คลังเก็บคำศัพท์ชั่วคราวใน Memory (Cache Queue)
+# 1. สมองคลังข้อมูลเบื้องหลัง (Cache Queue & Blacklist)
 WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
+USED_WORDS = set()  # บันทึกคำที่เคยเล่นไปแล้วเพื่อไม่ให้ทายซ้ำ
 
 TOPIC_MAP = {
     "A0": ["color", "animal", "number", "food", "family"],
@@ -20,17 +21,17 @@ TOPIC_MAP = {
     "B2": ["opinion", "process", "system", "culture", "law", "economy"]
 }
 
-# สำรองช้อยส์กรณี API แปลภาษาขัดข้อง
-BACKUP_FAKES = ["การเดินทาง", "ความสัมพันธ์", "สถานที่", "ความคิดเห็น", "การพัฒนา", "ความรู้สึก", "เป้าหมาย"]
+# สำรองช้อยส์กรณีแปลภาษาไทยซ้ำกัน
+BACKUP_FAKES = ["การเดินทาง", "ความสัมพันธ์", "สถานที่", "ความคิดเห็น", "การพัฒนา", "ความรู้สึก", "เป้าหมาย", "สภาพแวดล้อม"]
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    # เมื่อบอทพร้อม ทำการดึงคำศัพท์ล่วงหน้ามาเติมใส่ Cache ทันที
-    asyncio.create_task(preload_all_caches())
+    # รันระบบสมองเบื้องหลังทันทีเมื่อเริ่มเปิดบอท
+    asyncio.create_task(background_word_brain())
 
-# แปลคำศัพท์เป็นภาษาไทย
-async def fetch_translation(session, word: str):
+# 2. สมองคัดกรองความแปลและช้อยส์ภาษาไทย
+async def fetch_clean_translation(session, word: str):
     url = f"https://api.mymemory.translated.net/get?q={word}&langpair=en|th"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
@@ -38,33 +39,45 @@ async def fetch_translation(session, word: str):
                 data = await resp.json()
                 raw_text = data['responseData']['translatedText'].strip()
                 clean_text = raw_text.split(',')[0].split(';')[0].strip()
-                if clean_text.lower() != word.lower() and len(clean_text) < 30:
+                # กรองคำแปลที่เพี้ยนหรือตรงกับคำภาษาอังกฤษออก
+                if clean_text.lower() != word.lower() and len(clean_text) < 25:
                     return clean_text
     except Exception:
         pass
     return None
 
-# สุ่มคำศัพท์และแปลไทย 1 ข้อ
-async def fetch_single_quiz(session, level: str):
+# 3. สมองสุ่มคำศัพท์จากอินเทอร์เน็ต + ตรวจสอบความถูกต้อง
+async def generate_qualified_word(session, level: str):
     topic = random.choice(TOPIC_MAP.get(level, TOPIC_MAP["A1"]))
-    char = random.choice("abcdefghijklmnopqrstuvwxyz")
-    url = f"https://api.datamuse.com/words?ml={topic}&sp={char}*&max=30"
+    random_char = random.choice("abcdefghijklmnopqrstuvwxyz")
+    url = f"https://api.datamuse.com/words?ml={topic}&sp={random_char}*&max=30"
     
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                words = [item["word"] for item in data if item["word"].isalpha() and 3 <= len(item["word"]) <= 8]
-                if words:
-                    target_word = random.choice(words)
-                    translation = await fetch_translation(session, target_word)
+                # คัดกรองเอาเฉพาะตัวอักษรบริสุทธิ์ ไม่เคยเล่นมาก่อน และความยาวเหมาะสม
+                valid_words = [
+                    item["word"].upper() for item in data 
+                    if item["word"].isalpha() 
+                    and 3 <= len(item["word"]) <= 8 
+                    and item["word"].upper() not in USED_WORDS
+                ]
+                
+                if valid_words:
+                    target = random.choice(valid_words)
+                    translation = await fetch_clean_translation(session, target.lower())
+                    
                     if translation:
-                        # สร้างช้อยส์หลอก
-                        fake_samples = random.sample(BACKUP_FAKES, 3)
-                        choices = [translation] + fake_samples
+                        # สร้างช้อยส์หลอก 3 ช้อยส์ที่ไม่ซ้ำกับคำตอบจริง
+                        fakes = [f for f in BACKUP_FAKES if f != translation]
+                        selected_fakes = random.sample(fakes, 3)
+                        
+                        choices = [translation] + selected_fakes
                         random.shuffle(choices)
+                        
                         return {
-                            "word": target_word.upper(),
+                            "word": target,
                             "correct": translation,
                             "choices": choices
                         }
@@ -72,20 +85,21 @@ async def fetch_single_quiz(session, level: str):
         pass
     return None
 
-# ระบบเติมคำศัพท์ใส่ Cache ในฉากหลัง
-async def refill_cache(level: str, count: int = 5):
+# 4. สมองส่วนประมวลผลฉากหลัง (Background Brain Loop)
+async def background_word_brain():
+    print("🧠 สมองเบื้องหลังกำลังเริ่มค้นหาและจัดหมวดหมู่คำศัพท์จากอินเทอร์เน็ต...")
     async with aiohttp.ClientSession() as session:
-        tasks = [fetch_single_quiz(session, level) for _ in range(count)]
-        results = await asyncio.gather(*tasks)
-        for res in results:
-            if res:
-                WORD_CACHE[level].append(res)
-
-async def preload_all_caches():
-    print("⏳ กำลังเริ่มดึงคำศัพท์ล่วงหน้าเข้า Cache...")
-    for lvl in ["A0", "A1", "A2", "B1", "B2"]:
-        await refill_cache(lvl, count=5)
-    print("✅ เตรียมคลังคำศัพท์ล่วงหน้าเรียบร้อยพร้อมเล่น!")
+        while True:
+            for level in ["A0", "A1", "A2", "B1", "B2"]:
+                # ถ้าคำศัพท์ใน Cache ของระดับนั้นๆ มีน้อยกว่า 5 คำ ให้เติมทันที
+                if len(WORD_CACHE[level]) < 5:
+                    data = await generate_qualified_word(session, level)
+                    if data:
+                        WORD_CACHE[level].append(data)
+                        # บันทึกเข้า Blacklist ป้องกันนำคำเดิมมาใช้ซ้ำ
+                        USED_WORDS.add(data["word"])
+            # พักการทำงาน 1 วินาทีเพื่อไม่ให้บล็อกระบบ
+            await asyncio.sleep(1)
 
 # View ปุ่มตอบคำถาม 4 ช้อยส์
 class QuizChoiceView(discord.ui.View):
@@ -123,24 +137,15 @@ class LevelSelectView(discord.ui.View):
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
         await interaction.response.defer()
 
-        # 1. ตรวจสอบว่าใน Cache มีคำศัพท์เหลือไหม
-        if not WORD_CACHE[level]:
-            # ถ้า Cache หมด ให้ดึงสด 1 ข้อเป็น Fallback
-            async with aiohttp.ClientSession() as session:
-                quiz_data = await fetch_single_quiz(session, level)
-        else:
-            # ดึงคำศัพท์จาก Cache ทันที (Instant Speed < 0.1s)
+        # ดึงข้อมูลที่สมองคัดกรองเตรียมไว้แล้วมาแสดงผลทันที (< 0.1 วินาที)
+        if WORD_CACHE[level]:
             quiz_data = WORD_CACHE[level].pop(0)
-
-        # 2. แอบสั่งเติมคำศัพท์ใหม่เข้า Cache ในฉากหลังทันที (ไม่บล็อกการเล่น)
-        asyncio.create_task(refill_cache(level, count=2))
-
-        if not quiz_data:
-            # กรณีเกิดฉุกเฉิน API ล่มจริงๆ ให้ใช้ข้อความสำรอง
+        else:
+            # สำรองฉุกเฉินกรณีสมองยังดึงข้อมูลเข้า Cache ไม่ทัน
             quiz_data = {
-                "word": "KNOWLEDGE",
-                "correct": "ความรู้",
-                "choices": ["ความรู้", "ความคิด", "ความรู้สึก", "ประสบการณ์"]
+                "word": "OPPORTUNITY",
+                "correct": "โอกาส",
+                "choices": ["โอกาส", "ความสำเร็จ", "การเดินทาง", "ความคิดเห็น"]
             }
 
         embed = discord.Embed(
@@ -187,3 +192,4 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
+    
