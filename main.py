@@ -12,7 +12,6 @@ bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
 USED_WORDS = set()
 
-# คลังคำศัพท์พื้นฐานที่ใช้ในชีวิตประจำวัน แยกตามระดับ CEFR จริง
 BASE_VOCAB = {
     "A0": ["CAT", "DOG", "SUN", "BOY", "GIRL", "BOOK", "PEN", "FISH", "MILK", "CAR", "TREE", "BIRD", "WATER", "FOOD", "HAND"],
     "A1": ["HAPPY", "FAMILY", "SCHOOL", "FRIEND", "HOUSE", "ANIMAL", "APPLE", "DRINK", "MUSIC", "MONEY", "PHONE", "TIME", "DOCTOR", "MOTHER", "FATHER"],
@@ -21,7 +20,6 @@ BASE_VOCAB = {
     "B2": ["STRATEGY", "RESOURCE", "ANALYSIS", "CAPACITY", "CHALLENGE", "CRITICAL", "EVIDENCE", "GLOBAL", "IDENTITY", "OBJECTIVE", "PRIMITIVE", "STABILITY", "STRUCTURE", "SUSPECT", "TREND"]
 }
 
-# คำศัพท์ขยายเพิ่มเติมสำหรับวนลูปไร้ขีดจำกัด
 EXTRA_SEED_WORDS = {
     "A0": ["RED", "BLUE", "BIG", "SMALL", "RUN", "WALK", "HOT", "COLD", "EAT", "SEE"],
     "A1": ["CLEAN", "DIRTY", "EARLY", "LATE", "ALWAYS", "NEVER", "AGAIN", "TODAY", "BEFORE", "AFTER"],
@@ -37,7 +35,6 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     asyncio.create_task(infinite_word_brain())
 
-# แปลความหมายตามบริบทไทยจริง
 async def translate_in_context(session, word: str):
     url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
     try:
@@ -51,13 +48,10 @@ async def translate_in_context(session, word: str):
         pass
     return None
 
-# สร้างข้อทายจากคลังคำง่าย
 async def generate_simple_quiz(session, level: str):
-    # รวมคลังคำพื้นฐาน + คำขยาย
     pool = BASE_VOCAB.get(level, BASE_VOCAB["A1"]) + EXTRA_SEED_WORDS.get(level, EXTRA_SEED_WORDS["A1"])
     available_words = [w for w in pool if w not in USED_WORDS]
     
-    # ถ้าเล่นจนหมดคลัง ให้รีเซ็ตคลังกลับมาเล่นใหม่ได้วนลูป
     if not available_words:
         available_words = pool
         
@@ -77,7 +71,6 @@ async def generate_simple_quiz(session, level: str):
         }
     return None
 
-# สมองคัดกรองเบื้องหลัง วนลูปเตรียมคำง่ายๆ ไว้ใน Cache
 async def infinite_word_brain():
     print("🧠 สมองเบื้องหลังเริ่มทำงาน: คัดสรรเฉพาะคำศัพท์ง่ายๆ ที่ใช้งานจริง...")
     async with aiohttp.ClientSession() as session:
@@ -161,6 +154,20 @@ class LevelSelectView(discord.ui.View):
     async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.handle_level_click(interaction, "B2")
 
+    # เพิ่มปุ่ม "รีบอทใหม่" ถัดจาก B2 สีเหลือง (ButtonStyle.warning)
+    @discord.ui.button(label="รีบอทใหม่", style=discord.ButtonStyle.warning)
+    async def btn_reboot(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # ลบข้อความปัจจุบัน
+        await interaction.message.delete()
+        
+        # ส่งข้อความคำสั่ง !t ใหม่ขึ้นมาทันที
+        embed = discord.Embed(
+            title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ (คำศัพท์ใช้งานจริง)", 
+            description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถามง่ายๆ ได้เลยครับ:", 
+            color=0xF1C40F
+        )
+        await interaction.channel.send(embed=embed, view=LevelSelectView())
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -177,3 +184,4 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
+
