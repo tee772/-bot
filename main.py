@@ -9,97 +9,105 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# 1. สมองคลังข้อมูลเบื้องหลัง (Cache Queue & Blacklist)
+# 1. สมองคลังข้อมูลเบื้องหลัง (Infinite Cache & History Tracking)
 WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
-USED_WORDS = set()  # บันทึกคำที่เคยเล่นไปแล้วเพื่อไม่ให้ทายซ้ำ
+USED_WORDS = set()
 
-TOPIC_MAP = {
-    "A0": ["color", "animal", "number", "food", "family"],
-    "A1": ["home", "school", "clothes", "time", "body", "city"],
-    "A2": ["travel", "weather", "work", "hobby", "health", "nature"],
-    "B1": ["business", "feeling", "society", "media", "science", "art"],
-    "B2": ["opinion", "process", "system", "culture", "law", "economy"]
+# หมวดหมู่บริบทในการดึงคำศัพท์
+CONTEXT_CATEGORIES = {
+    "A0": ["family", "animals", "daily_life", "food", "objects"],
+    "A1": ["work", "shopping", "feelings", "places", "activities"],
+    "A2": ["travel", "health", "technology", "society", "nature"],
+    "B1": ["business", "education", "relationships", "culture", "environment"],
+    "B2": ["philosophy", "economy", "politics", "science", "psychology"]
 }
 
-# สำรองช้อยส์กรณีแปลภาษาไทยซ้ำกัน
-BACKUP_FAKES = ["การเดินทาง", "ความสัมพันธ์", "สถานที่", "ความคิดเห็น", "การพัฒนา", "ความรู้สึก", "เป้าหมาย", "สภาพแวดล้อม"]
+# ช้อยส์บริบทหลอกตามประเภท เพื่อให้ช้อยส์เนียนสมจริง
+CONTEXT_FAKES = {
+    "A0": ["สัตว์เลี้ยง", "อาหารเช้า", "ของใช้ในบ้าน", "สมาชิกในครอบครัว", "สีสัน"],
+    "A1": ["กิจกรรมยามว่าง", "การเดินทาง", "สถานที่ทำงาน", "อารมณ์ความรู้สึก", "การซื้อของ"],
+    "A2": ["การดูแลสุขภาพ", "สภาพอากาศ", "การท่องเที่ยว", "อุปกรณ์เทคโนโลยี", "ธรรมชาติ"],
+    "B1": ["การบริหารจัดการ", "ความสัมพันธ์", "การวางแผนอนาคต", "การแก้ไขปัญหา", "วัฒนธรรม"],
+    "B2": ["ทัศนคติเชิงบวก", "การวิเคราะห์ข้อมูล", "ความขัดแย้งทางความคิด", "นโยบายสาธารณะ", "ทฤษฎีทางวิทยาศาสตร์"]
+}
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    # รันระบบสมองเบื้องหลังทันทีเมื่อเริ่มเปิดบอท
-    asyncio.create_task(background_word_brain())
+    # เปิดสมองวนลูปเบื้องหลังทันที
+    asyncio.create_task(infinite_word_finder())
 
-# 2. สมองคัดกรองความแปลและช้อยส์ภาษาไทย
-async def fetch_clean_translation(session, word: str):
-    url = f"https://api.mymemory.translated.net/get?q={word}&langpair=en|th"
+# 2. ระบบแปลตามบริบทภาษาไทย (Context-Aware Translator)
+async def translate_in_context(session, word: str):
+    # ดึงข้อมูลจาก Google Translation Engine สำหรับบริบทการใช้งานจริง
+    url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                raw_text = data['responseData']['translatedText'].strip()
-                clean_text = raw_text.split(',')[0].split(';')[0].strip()
-                # กรองคำแปลที่เพี้ยนหรือตรงกับคำภาษาอังกฤษออก
-                if clean_text.lower() != word.lower() and len(clean_text) < 25:
-                    return clean_text
+                translated = data[0][0][0].strip()
+                
+                # กรองไม่ให้แปลทับศัพท์ หรือแปลยาวเป็นประโยค
+                if translated.lower() != word.lower() and 2 <= len(translated) <= 25:
+                    return translated
     except Exception:
         pass
     return None
 
-# 3. สมองสุ่มคำศัพท์จากอินเทอร์เน็ต + ตรวจสอบความถูกต้อง
-async def generate_qualified_word(session, level: str):
-    topic = random.choice(TOPIC_MAP.get(level, TOPIC_MAP["A1"]))
-    random_char = random.choice("abcdefghijklmnopqrstuvwxyz")
-    url = f"https://api.datamuse.com/words?ml={topic}&sp={random_char}*&max=30"
+# 3. ค้นหาคำศัพท์วนลูปจาก Datamuse & คัดกรองบริบท
+async def fetch_contextual_quiz(session, level: str):
+    category = random.choice(CONTEXT_CATEGORIES.get(level, CONTEXT_CATEGORIES["A1"]))
+    char = random.choice("abcdefghijklmnopqrstuvwxyz")
+    url = f"https://api.datamuse.com/words?ml={category}&sp={char}*&max=40"
     
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                # คัดกรองเอาเฉพาะตัวอักษรบริสุทธิ์ ไม่เคยเล่นมาก่อน และความยาวเหมาะสม
-                valid_words = [
+                # กรองเอาเฉพาะศัพท์ที่เป็นคำเดี่ยว ไร้ตัวเลข และไม่เคยเล่นมาก่อน
+                candidates = [
                     item["word"].upper() for item in data 
                     if item["word"].isalpha() 
-                    and 3 <= len(item["word"]) <= 8 
+                    and 3 <= len(item["word"]) <= 10 
                     and item["word"].upper() not in USED_WORDS
                 ]
                 
-                if valid_words:
-                    target = random.choice(valid_words)
-                    translation = await fetch_clean_translation(session, target.lower())
+                if candidates:
+                    target_word = random.choice(candidates)
+                    thai_context_meaning = await translate_in_context(session, target_word.lower())
                     
-                    if translation:
-                        # สร้างช้อยส์หลอก 3 ช้อยส์ที่ไม่ซ้ำกับคำตอบจริง
-                        fakes = [f for f in BACKUP_FAKES if f != translation]
-                        selected_fakes = random.sample(fakes, 3)
+                    if thai_context_meaning:
+                        # สร้างช้อยส์หลอกตามบริบทที่สมเหตุสมผล
+                        fake_pool = [f for f in CONTEXT_FAKES.get(level, CONTEXT_FAKES["A1"]) if f != thai_context_meaning]
+                        fakes = random.sample(fake_pool, min(3, len(fake_pool)))
                         
-                        choices = [translation] + selected_fakes
+                        choices = [thai_context_meaning] + fakes
                         random.shuffle(choices)
                         
                         return {
-                            "word": target,
-                            "correct": translation,
+                            "word": target_word,
+                            "correct": thai_context_meaning,
                             "choices": choices
                         }
     except Exception:
         pass
     return None
 
-# 4. สมองส่วนประมวลผลฉากหลัง (Background Brain Loop)
-async def background_word_brain():
-    print("🧠 สมองเบื้องหลังกำลังเริ่มค้นหาและจัดหมวดหมู่คำศัพท์จากอินเทอร์เน็ต...")
+# 4. สมองวนลูปค้นหาคำศัพท์เบื้องหลังตลอดเวลา (Infinite Background Loop)
+async def infinite_word_finder():
+    print("🧠 สมองเบื้องหลังกำลังทำงานวนลูปค้นหาคำศัพท์ตามบริบทไร้ขีดจำกัด...")
     async with aiohttp.ClientSession() as session:
         while True:
             for level in ["A0", "A1", "A2", "B1", "B2"]:
-                # ถ้าคำศัพท์ใน Cache ของระดับนั้นๆ มีน้อยกว่า 5 คำ ให้เติมทันที
+                # เติมคำศัพท์ใส่ Cache ถ้ามีน้อยกว่า 5 ข้อ
                 if len(WORD_CACHE[level]) < 5:
-                    data = await generate_qualified_word(session, level)
-                    if data:
-                        WORD_CACHE[level].append(data)
-                        # บันทึกเข้า Blacklist ป้องกันนำคำเดิมมาใช้ซ้ำ
-                        USED_WORDS.add(data["word"])
-            # พักการทำงาน 1 วินาทีเพื่อไม่ให้บล็อกระบบ
-            await asyncio.sleep(1)
+                    quiz_item = await fetch_contextual_quiz(session, level)
+                    if quiz_item:
+                        WORD_CACHE[level].append(quiz_item)
+                        USED_WORDS.add(quiz_item["word"]) # ลงบันทึกห้ามใช้ซ้ำ
+            
+            # พัก 0.8 วินาทีต่อรอบ เพื่อไม่ให้โดนบล็อก IP
+            await asyncio.sleep(0.8)
 
 # View ปุ่มตอบคำถาม 4 ช้อยส์
 class QuizChoiceView(discord.ui.View):
@@ -117,9 +125,9 @@ class QuizChoiceView(discord.ui.View):
             await interaction.response.defer()
             
             if choice == self.correct_answer:
-                embed = discord.Embed(title="🎉 ถูกต้องครับ!", description=f"คำตอบที่ถูกต้องคือ:\n**{choice}**", color=0x2ECC71)
+                embed = discord.Embed(title="🎉 ถูกต้องตามบริบท!", description=f"ความหมายที่ถูกต้องคือ:\n**{choice}**", color=0x2ECC71)
             else:
-                embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คำตอบที่ถูกต้องคือ:\n**{self.correct_answer}**", color=0xE74C3C)
+                embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คุณเลือก: {choice}\n\nความหมายตามบริบทคือ:\n**{self.correct_answer}**", color=0xE74C3C)
 
             for item in self.children:
                 item.disabled = True
@@ -137,20 +145,20 @@ class LevelSelectView(discord.ui.View):
     async def handle_level_click(self, interaction: discord.Interaction, level: str):
         await interaction.response.defer()
 
-        # ดึงข้อมูลที่สมองคัดกรองเตรียมไว้แล้วมาแสดงผลทันที (< 0.1 วินาที)
+        # ดึงคำศัพท์ที่สมองคัดกรองบริบทมาเตรียมไว้แล้ว (< 0.1 วินาที)
         if WORD_CACHE[level]:
             quiz_data = WORD_CACHE[level].pop(0)
         else:
-            # สำรองฉุกเฉินกรณีสมองยังดึงข้อมูลเข้า Cache ไม่ทัน
+            # สำรองกรณีสมองกำลังประมวลผลคำแรก
             quiz_data = {
-                "word": "OPPORTUNITY",
-                "correct": "โอกาส",
-                "choices": ["โอกาส", "ความสำเร็จ", "การเดินทาง", "ความคิดเห็น"]
+                "word": "PERSPECTIVE",
+                "correct": "มุมมอง / ทัศนคติ",
+                "choices": ["มุมมอง / ทัศนคติ", "สภาพแวดล้อม", "การวางแผนอนาคต", "การบริหารจัดการ"]
             }
 
         embed = discord.Embed(
             title=f"🎯 ทายคำศัพท์ระดับ {level}",
-            description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยของคำนี้คือข้อใด?:",
+            description=f"คำศัพท์: **{quiz_data['word']}**\n\nความหมายตามบริบทการใช้งานจริงคือข้อใด?:",
             color=0x3498DB
         )
 
