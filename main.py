@@ -9,17 +9,17 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
 
-# ฐานคำศัพท์ความถี่สูงแยกตามระดับ CEFR สำหรับนำไปสุ่มคำที่เกี่ยวข้องกันจากอินเทอร์เน็ต
-FREQUENT_SEEDS = {
-    "A0": ["cat", "dog", "sun", "red", "boy", "car", "pen", "hat", "cup", "run", "fan", "box", "sky", "sea", "bus", "day", "hot", "man", "map", "bed"],
-    "A1": ["book", "milk", "fish", "home", "love", "tree", "bird", "food", "city", "park", "game", "time", "work", "rain", "cake", "door", "face", "girl", "help", "life"],
-    "A2": ["travel", "weather", "garden", "market", "dinner", "family", "doctor", "summer", "winter", "friend", "school", "street", "person", "animal", "window", "answer"],
-    "B1": ["health", "education", "business", "society", "solution", "system", "action", "detail", "ability", "benefit", "company", "culture", "effort", "future", "nature"],
-    "B2": ["strategy", "analysis", "science", "global", "theory", "method", "factor", "concept", "impact", "resource", "network", "challenge", "evidence", "process"]
-}
+# เมล็ดคำศัพท์ความถี่สูงสำหรับค้นหาคำเกี่ยวข้องกันจากอินเทอร์เน็ต
+SEED_WORDS = [
+    "cat", "dog", "sun", "red", "boy", "car", "pen", "hat", "cup", "run",
+    "book", "milk", "fish", "home", "love", "tree", "bird", "food", "city",
+    "travel", "weather", "garden", "market", "dinner", "family", "doctor",
+    "health", "education", "business", "society", "solution", "system",
+    "strategy", "analysis", "science", "global", "theory", "method", "factor"
+]
 
-# คลังคำศัพท์ที่ผ่านการดึงและแปลภาษาเสร็จสมบูรณ์แล้ว
-READY_WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
+# คลังคำศัพท์กลางแบบยังไม่ระบุระดับ (Uncategorized Pool)
+UNCATEGORIZED_CACHE = []
 USED_WORDS = set()
 
 BACKUP_FAKES = [
@@ -30,7 +30,7 @@ BACKUP_FAKES = [
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    print("🚀 เริ่มระบบดึงและเตรียมคำศัพท์ใหม่ล่วงหน้าตลอดเวลา (Background Infinite Stream)...")
+    print("🚀 เริ่มดึงคำศัพท์ใหม่จากเน็ตเข้าคลังกลาง (Uncategorized Stream)...")
     asyncio.create_task(background_word_fetcher())
 
 async def translate_in_context(session, word: str):
@@ -53,39 +53,61 @@ async def build_quiz_item(session, word: str):
         selected_fakes = random.sample(fakes, min(len(fakes), 3))
         choices = [thai_meaning] + selected_fakes
         random.shuffle(choices)
-        return {"word": word.upper(), "correct": thai_meaning, "choices": choices}
+        return {"word": word.upper(), "correct": thai_meaning, "choices": choices, "length": len(word)}
     return None
 
-# ระบบดึงคำศัพท์ใหม่จากอินเทอร์เน็ตล่วงหน้าตลอดเวลาแบบไม่หยุด
+# ดึงคำศัพท์จากเน็ตและแปลภาษาเสร็จสมบูรณ์เข้าคลังกลาง (ยังไม่ระบุระดับ)
 async def background_word_fetcher():
     async with aiohttp.ClientSession() as session:
         while True:
-            for level, seeds in FREQUENT_SEEDS.items():
-                if len(READY_WORD_CACHE[level]) < 100:
-                    seed = random.choice(seeds)
-                    url = f"https://api.datamuse.com/words?ml={seed}&max=30"
-                    try:
-                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
-                            if resp.status == 200:
-                                data = await resp.json()
-                                candidates = [seed] + [item.get("word", "") for item in data]
-                                random.shuffle(candidates)
-                                
-                                for candidate in candidates:
-                                    w = candidate.upper()
-                                    if w.isalpha() and w not in USED_WORDS and len(w) >= 3:
-                                        # ทำการดึงคำแปลเตรียมไว้ล่วงหน้าให้เสร็จสิ้นก่อนเก็บลงคลัง
-                                        quiz = await build_quiz_item(session, w)
-                                        if quiz:
-                                            READY_WORD_CACHE[level].append(quiz)
-                                            USED_WORDS.add(w)
-                                            print(f"✅ [LOADED & READY] ({level}): {w} | ในคลังพร้อมใช้: {len(READY_WORD_CACHE[level])} คำ")
-                                            await asyncio.sleep(0.1)
-                                            break
-                    except Exception as e:
-                        print(f"⚠️ Fetch Note ({level}): {e}")
+            if len(UNCATEGORIZED_CACHE) < 200:
+                seed = random.choice(SEED_WORDS)
+                url = f"https://api.datamuse.com/words?ml={seed}&max=40"
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            candidates = [seed] + [item.get("word", "") for item in data]
+                            random.shuffle(candidates)
+                            
+                            for candidate in candidates:
+                                w = candidate.upper()
+                                if w.isalpha() and w not in USED_WORDS and len(w) >= 3:
+                                    quiz = await build_quiz_item(session, w)
+                                    if quiz:
+                                        UNCATEGORIZED_CACHE.append(quiz)
+                                        USED_WORDS.add(w)
+                                        print(f"✅ [FETCHED & READY] {w} (ความยาว {len(w)}) | ในคลังกลาง: {len(UNCATEGORIZED_CACHE)} คำ")
+                                        await asyncio.sleep(0.1)
+                                        break
+                except Exception as e:
+                    print(f"⚠️ Fetch Note: {e}")
 
             await asyncio.sleep(0.2)
+
+# ฟังก์ชั่นคัดเลือกคำศัพท์จากคลังกลางตามระดับที่ผู้เล่นเลือกจริงๆ
+def match_word_for_level(level: str):
+    if not UNCATEGORIZED_CACHE:
+        return None
+
+    # ตัวระบุเงื่อนไขระดับความยากตามความซับซ้อนและความยาวของคำศัพท์
+    level_filters = {
+        "A0": lambda item: item["length"] <= 4,
+        "A1": lambda item: 4 <= item["length"] <= 5,
+        "A2": lambda item: 5 <= item["length"] <= 6,
+        "B1": lambda item: 6 <= item["length"] <= 7,
+        "B2": lambda item: item["length"] >= 8
+    }
+
+    filter_func = level_filters.get(level, lambda item: True)
+    
+    # ค้นหาคำที่ตรงกับระดับ
+    for idx, item in enumerate(UNCATEGORIZED_CACHE):
+        if filter_func(item):
+            return UNCATEGORIZED_CACHE.pop(idx)
+            
+    # กรณีไม่มีคำตรงระดับเป๊ะๆ ในคลังกลาง ดึงคำสุ่มที่ใกล้เคียงที่สุดมาใช้แทน
+    return UNCATEGORIZED_CACHE.pop(0)
 
 class QuizChoiceView(discord.ui.View):
     def __init__(self, correct_answer, choices):
@@ -132,10 +154,10 @@ class LevelSelectView(discord.ui.View):
         except Exception:
             pass
 
-        # ดึงเฉพาะคำศัพท์ที่โหลดและเตรียมโจทย์เสร็จสมบูรณ์แล้วเท่านั้น
-        if READY_WORD_CACHE[level]:
-            quiz_data = READY_WORD_CACHE[level].pop(0)
-            
+        # ตัวระบุระดับทำการคัดเลือกคำศัพท์จากคลังกลางที่ดึงเสร็จแล้ว
+        quiz_data = match_word_for_level(level)
+
+        if quiz_data:
             embed = discord.Embed(
                 title=f"🎯 ทายคำศัพท์ระดับ {level}",
                 description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยคือข้อใด?:",
@@ -149,7 +171,7 @@ class LevelSelectView(discord.ui.View):
         else:
             embed = discord.Embed(
                 title="⏳ กำลังเตรียมคำศัพท์ใหม่...",
-                description=f"คำศัพท์ระดับ **{level}** กำลังถูกโหลดและประมวลผลแปลภาษาจากอินเทอร์เน็ต\n\n**กรุณากดปุ่มอีกครั้งใน 1-2 วินาทีครับ**",
+                description=f"กำลังโหลดและประมวลผลคำศัพท์ใหม่จากอินเทอร์เน็ต\n\n**กรุณากดปุ่มอีกครั้งใน 1-2 วินาทีครับ**",
                 color=0xE67E22
             )
             try:
@@ -216,4 +238,3 @@ async def on_message(message):
 token = os.getenv("DISCORD_TOKEN")
 if token:
     bot.run(token)
-    
