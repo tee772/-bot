@@ -11,7 +11,7 @@ from difflib import SequenceMatcher
 # ⚙️ ตั้งค่าการเชื่อมต่อ
 # ==========================================
 TARGET_CHANNEL_ID = 1555905970050437206
-BOT_TOKEN = "MTU1NTg5OTk0MzE4MzQ1MDE4Mw.Gy0qEO.6JBccig9EbpgO3NCePLWSxs3cZsseyo8CQ1qgo"
+BOT_TOKEN = "MTU1NTg5OTk0MzE4MzQ1MDE4Mw.GSFe43.eMc_7F9qKNS8TicoiC2zv4PsjHybe6zse5wRPM"
 HF_API_KEY = "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"
 
 hf_client = InferenceClient(
