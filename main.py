@@ -1,217 +1,296 @@
-import os
+import json
+import re
 import random
-import aiohttp
 import asyncio
 import discord
 from discord.ext import commands
+from huggingface_hub import InferenceClient
+from difflib import SequenceMatcher
 
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix=["t!", "!t"], intents=intents)
+# ==========================================
+# ⚙️ ตั้งค่าการเชื่อมต่อ
+# ==========================================
+TARGET_CHANNEL_ID = 1555905970050437206
+BOT_TOKEN = "MTU1NTg5OTk0MzE4MzQ1MDE4Mw.Gy0qEO.6JBccig9EbpgO3NCePLWSxs3cZsseyo8CQ1qgo"
+HF_API_KEY = "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"
 
-# URL สำหรับดาวน์โหลดไฟล์ Top 5,000 คำศัพท์ภาษาอังกฤษที่ใช้บ่อยที่สุด
-WORDLIST_URL = "https://raw.githubusercontent.com/david47k/top-english-wordlists/master/top_english_words_lower_10000.txt"
+hf_client = InferenceClient(
+    model="Qwen/Qwen2.5-72B-Instruct",
+    token=HF_API_KEY
+)
 
-FETCHED_5000_WORDS = []
-WORD_CACHE = {"A0": [], "A1": [], "A2": [], "B1": [], "B2": []}
-USED_WORDS = set()
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-BACKUP_FAKES = ["ความรู้สึก", "การเดินทาง", "ครอบครัว", "ความคิดเห็น", "ความสำเร็จ", "สภาพแวดล้อม", "การพัฒนา", "โอกาส", "ประสบการณ์", "เป้าหมาย"]
+channel_active_quizzes = {}
+used_sentences_history = []
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
-    print("🌐 กำลังดาวน์โหลดไฟล์ Top 5,000 คำศัพท์จากอินเทอร์เน็ต...")
-    
-    async with aiohttp.ClientSession() as session:
-        await fetch_top_words_from_internet(session)
-
-    print("🧠 สมองเบื้องหลังเริ่มทำงาน: เตรียมคำศัพท์ Top 5,000 ไว้ใน Cache...")
-    asyncio.create_task(infinite_word_brain())
-
-# ฟังก์ชันดาวน์โหลดคำศัพท์ Top 5,000 จากอินเทอร์เน็ต
-async def fetch_top_words_from_internet(session):
-    global FETCHED_5000_WORDS
-    try:
-        async with session.get(WORDLIST_URL, timeout=aiohttp.ClientTimeout(total=10.0)) as resp:
-            if resp.status == 200:
-                text = await resp.text()
-                lines = [line.strip() for line in text.splitlines() if line.strip().isalpha()]
-                FETCHED_5000_WORDS = [w.upper() for w in lines if len(w) >= 2][:5000]
-                print(f"✅ โหลดไฟล์ Top 5,000 คำสำเร็จ! ({len(FETCHED_5000_WORDS)} คำ)")
-            else:
-                print(f"⚠️ HTTP Status: {resp.status}")
-    except Exception as e:
-        print(f"⚠️ Load Error: {e}")
-
-# แบ่งระดับความยากตามลำดับความถี่ใน Top 5,000
-def get_level_by_rank(index):
-    if index < 300:
-        return "A0"
-    elif index < 1000:
-        return "A1"
-    elif index < 2000:
-        return "A2"
-    elif index < 3500:
-        return "B1"
-    else:
-        return "B2"
-
-# แปลความหมายตามบริบทไทยจริง
-async def translate_in_context(session, word: str):
-    url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=th&dt=t&q={word}"
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=2.5)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                translated = data[0][0][0].strip()
-                if translated.lower() != word.lower() and len(translated) <= 25:
-                    return translated
-    except Exception:
-        pass
-    return None
-
-# สร้างข้อทายจากคลัง Top 5,000 ที่โหลดมาจากอินเทอร์เน็ต
-async def generate_simple_quiz(session, level: str):
-    if not FETCHED_5000_WORDS:
-        return None
-
-    # คัดเอาเฉพาะคำศัพท์ Top 5,000 ที่ตรงตามระดับความยากนั้นๆ
-    candidates = [
-        (idx, word) for idx, word in enumerate(FETCHED_5000_WORDS) 
-        if get_level_by_rank(idx) == level and word not in USED_WORDS
+# ==========================================
+# 🧠 1. ฟังก์ชันเจนประโยคใหม่ (ปรับปรุงใหม่ให้หลากหลายและแม่นยำขึ้น)
+# ==========================================
+async def generate_sentence_with_hf(level_name: str):
+    global used_sentences_history
+    random_seed = random.randint(10000, 99999)
+    topics = [
+        "animals and pets", "favorite foods and cooking", "daily routines and habits", 
+        "weather and seasons", "hobbies and free time", "travel and places", 
+        "family and friends", "school and studying", "sports and exercise", 
+        "shopping and money", "feelings and emotions", "jobs and work life",
+        "technology and gadgets", "health and lifestyle", "weekend plans"
     ]
+    selected_topic = random.choice(topics)
     
-    # ถ้าเล่นจนหมดคลังระดับนั้นแล้ว ให้รีเซ็ตประวัติของระดับนั้นมาสุ่มใหม่ได้วนลูป
-    if not candidates:
-        for idx, word in enumerate(FETCHED_5000_WORDS):
-            if get_level_by_rank(idx) == level:
-                USED_WORDS.discard(word)
-        candidates = [
-            (idx, word) for idx, word in enumerate(FETCHED_5000_WORDS) 
-            if get_level_by_rank(idx) == level
-        ]
-
-    if not candidates:
-        return None
-
-    _, target_word = random.choice(candidates)
-    thai_meaning = await translate_in_context(session, target_word.lower())
+    history_str = ", ".join(used_sentences_history[-20:]) if used_sentences_history else "None"
     
-    if thai_meaning:
-        fakes = [f for f in BACKUP_FAKES if f != thai_meaning]
-        selected_fakes = random.sample(fakes, min(len(fakes), 3))
-        choices = [thai_meaning] + selected_fakes
-        random.shuffle(choices)
+    prompt = f"""
+    You are an expert English teacher. Generate ONE natural, everyday English sentence along with its accurate Thai translation.
+    Difficulty Level: {level_name}
+    Topic: {selected_topic}
+    Random Seed: {random_seed}
+    
+    Previously used sentences (DO NOT use these or similar ones): [{history_str}]
+    
+    Guidelines based on levels:
+    - A0: Very short, simple sentences (2-4 words) like "I like cats.", "This is red."
+    - A1: Simple sentences (4-6 words) with basic grammar like "She drinks milk.", "Where is my bag?"
+    - A2: Everyday spoken sentences (5-8 words) like "I went to the market.", "Can you help me?"
+    - B1/B2: Natural intermediate/upper-intermediate sentences with common phrases.
+    
+    Strict Rules:
+    - Use ONLY English and Thai. No other languages.
+    - Output MUST BE strictly a valid JSON object with keys "en" and "th". Format: {{"en": "English sentence", "th": "Thai translation"}}
+    """
+
+    loop = asyncio.get_event_loop()
+    
+    def call_api():
+        response = hf_client.chat_completion(
+            messages=[
+                {"role": "system", "content": "You are a helpful English teacher API. You must respond with valid JSON only."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=150,
+            temperature=0.95
+        )
+        return response.choices[0].message.content.strip()
+
+    try:
+        raw_text = await loop.run_in_executor(None, call_api)
         
-        return {
-            "word": target_word,
-            "correct": thai_meaning,
-            "choices": choices
-        }
-    return None
+        # ค้นหาโครงสร้าง JSON จากข้อความที่โมเดลตอบกลับมา
+        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if match:
+            raw_text = match.group(0)
 
-# สมองคัดกรองเบื้องหลัง วนลูปเตรียมคำจาก Top 5,000 ไว้ใน Cache
-async def infinite_word_brain():
-    async with aiohttp.ClientSession() as session:
-        while True:
-            if not FETCHED_5000_WORDS:
-                await asyncio.sleep(1.0)
-                continue
+        data = json.loads(raw_text)
+        en_res = data["en"].strip()
+        th_res = data["th"].strip()
+        
+    except Exception as e:
+        print(f"API Error / Fallback triggered: {e}")
+        # ขยายรายการ Fallback ให้หลากหลายขึ้นป้องกันประโยคซ้ำซาก
+        fallback_list = [
+            ("I love eating fresh apples in the morning.", "ฉันชอบกินแอปเปิ้ลสดๆ ในตอนเช้า"),
+            ("He plays football with his friends every weekend.", "เขาเล่นฟุตบอลกับเพื่อนๆ ทุกวันหยุดสุดสัปดาห์"),
+            ("Excuse me, could you tell me where the nearest library is?", "ขอโทษนะครับ ช่วยบอกหน่อยได้ไหมว่าห้องสมุดที่ใกล้ที่สุดอยู่ที่ไหน"),
+            ("The weather is absolutely nice and sunny today.", "วันนี้อากาศดีและมีแดดจัดมากๆ"),
+            ("She is quietly reading an interesting book in her room.", "เธอกำลังนั่งอ่านหนังสือที่น่าสนใจอย่างเงียบๆ อยู่ในห้องของเธอ"),
+            ("I usually drink a cup of hot coffee before starting work.", "ฉันมักจะดื่มกาแฟร้อนๆ หนึ่งแก้วก่อนเริ่มทำงาน"),
+            ("Do you have any plans for the upcoming holiday?", "คุณมีแผนสำหรับวันหยุดที่จะถึงนี้หรือยัง"),
+            ("Learning a new language requires patience and consistent practice.", "การเรียนรู้ภาษาใหม่ต้องอาศัยความอดทนและการฝึกฝนอย่างสม่ำเสมอ")
+        ]
+        en_res, th_res = random.choice(fallback_list)
+    
+    used_sentences_history.append(en_res)
+    if len(used_sentences_history) > 40:
+        used_sentences_history.pop(0)
+        
+    return en_res, th_res
 
-            for level in ["A0", "A1", "A2", "B1", "B2"]:
-                if len(WORD_CACHE[level]) < 5:
-                    quiz = await generate_simple_quiz(session, level)
-                    if quiz:
-                        WORD_CACHE[level].append(quiz)
-                        USED_WORDS.add(quiz["word"])
-            await asyncio.sleep(0.5)
+# ==========================================
+# 🧠 2. ฟังก์ชัน AI ตรวจคำตอบ
+# ==========================================
+async def check_answer_with_ai(target_th: str, target_en: str, user_ans: str) -> bool:
+    u_clean = re.sub(r"[^\w\s]", "", user_ans.lower().strip())
+    e_clean = re.sub(r"[^\w\s]", "", target_en.lower().strip())
 
-class QuizChoiceView(discord.ui.View):
-    def __init__(self, correct_answer, choices):
-        super().__init__(timeout=60)
-        self.correct_answer = correct_answer
+    if u_clean == e_clean:
+        return True
 
-        for choice in choices:
-            button = discord.ui.Button(label=choice[:80], style=discord.ButtonStyle.secondary)
-            button.callback = self.make_callback(choice)
-            self.add_item(button)
+    prompt = f"""
+    You are a strict English grammar teacher evaluating a student's answer.
+    
+    Thai sentence: "{target_th}"
+    Expected English: "{target_en}"
+    Student's Answer: "{user_ans}"
+    
+    Rules:
+    - Does the student's answer accurately translate the Thai sentence with correct grammar and vocabulary?
+    - If key words are wrong or meaning changes, answer INCORRECT.
+    - Answer EXACTLY one word: "CORRECT" or "INCORRECT".
+    """
 
-    def make_callback(self, choice):
-        async def callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-            
-            if choice == self.correct_answer:
-                embed = discord.Embed(title="🎉 ถูกต้องครับ!", description=f"คำตอบคือ:\n**{choice}**", color=0x2ECC71)
-            else:
-                embed = discord.Embed(title="❌ ยังไม่ถูกต้องครับ", description=f"คำตอบที่ถูกต้องคือ:\n**{self.correct_answer}**", color=0xE74C3C)
+    loop = asyncio.get_event_loop()
+    
+    def call_api():
+        response = hf_client.chat_completion(
+            messages=[
+                {"role": "system", "content": "You are a strict English evaluator. Respond with ONLY 'CORRECT' or 'INCORRECT'."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=10,
+            temperature=0.0
+        )
+        return response.choices[0].message.content.strip()
 
-            for item in self.children:
-                item.disabled = True
-            await interaction.edit_original_response(view=self)
+    try:
+        result = await loop.run_in_executor(None, call_api)
+        return "CORRECT" in result.upper() and "INCORRECT" not in result.upper()
+    except Exception as e:
+        print(f"Check AI Error: {e}")
+        similarity = SequenceMatcher(None, u_clean, e_clean).ratio()
+        return similarity >= 0.85
 
-            next_embed = discord.Embed(title="🎮 เล่นคำต่อไป", description="เลือกระดับความยากด้านล่างเพื่อเล่นต่อได้เลยครับ:", color=0xF1C40F)
-            await interaction.followup.send(embeds=[embed, next_embed], view=LevelSelectView())
-        return callback
+# ==========================================
+# 🔘 ปุ่มกดเฉลย / ข้ามโจทย์
+# ==========================================
+class SkipQuizView(discord.ui.View):
+    def __init__(self, channel_id: int):
+        super().__init__(timeout=None)
+        self.channel_id = channel_id
 
-class LevelSelectView(discord.ui.View):
+    @discord.ui.button(label="💡 ดูเฉลย / ข้ามข้อนี้", style=discord.ButtonStyle.danger)
+    async def button_skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.channel_id in channel_active_quizzes:
+            quiz_data = channel_active_quizzes[self.channel_id]
+            answer = quiz_data["en"]
+            del channel_active_quizzes[self.channel_id]
+
+            embed = discord.Embed(
+                title="💡 เฉลยคำตอบ",
+                description=f"โจทย์: **\"{quiz_data['th']}\"**\nคำตอบที่ถูกต้องคือ: `{answer}`\n\n*(กดเลือกความยากด้านล่างเพื่อเริ่มข้อใหม่ได้เลยครับ)*",
+                color=discord.Color.orange()
+            )
+            await interaction.response.send_message(embed=embed)
+            await interaction.channel.send(embed=discord.Embed(title="🎯 เลือกระดับความยากข้อต่อไป:", color=discord.Color.gold()), view=QuizLevelView())
+        else:
+            await interaction.response.send_message("⚠️ ไม่พบข้อสอบที่กำลังเล่นอยู่ครับ", ephemeral=True)
+
+# ==========================================
+# 🔘 ปุ่มกดเลือกระดับความยาก (5 ปุ่ม)
+# ==========================================
+class QuizLevelView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)
 
-    async def handle_level_click(self, interaction: discord.Interaction, level: str):
+    @discord.ui.button(label="⚪ Level A0 (เริ่มต้นมาก)", style=discord.ButtonStyle.secondary, row=0)
+    async def button_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.process_quiz(interaction, "A0 - Starter")
+
+    @discord.ui.button(label="🟢 Level A1 (เริ่มต้น)", style=discord.ButtonStyle.success, row=0)
+    async def button_a1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.process_quiz(interaction, "A1 - Elementary")
+
+    @discord.ui.button(label="🔵 Level A2 (พื้นฐาน)", style=discord.ButtonStyle.primary, row=0)
+    async def button_a2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.process_quiz(interaction, "A2 - Pre-Intermediate")
+
+    @discord.ui.button(label="🟡 Level B1 (ปานกลาง)", style=discord.ButtonStyle.primary, row=1)
+    async def button_b1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.process_quiz(interaction, "B1 - Intermediate")
+
+    @discord.ui.button(label="🔴 Level B2 (ท้าทาย)", style=discord.ButtonStyle.danger, row=1)
+    async def button_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.process_quiz(interaction, "B2 - Upper-Intermediate")
+
+    async def process_quiz(self, interaction: discord.Interaction, level_name: str):
         await interaction.response.defer()
 
-        if WORD_CACHE[level]:
-            quiz_data = WORD_CACHE[level].pop(0)
-        else:
-            quiz_data = {
-                "word": "HAPPY",
-                "correct": "มีความสุข",
-                "choices": ["มีความสุข", "ครอบครัว", "การเดินทาง", "ประสบการณ์"]
+        try:
+            channel_id = interaction.channel.id
+            en_sentence, th_sentence = await generate_sentence_with_hf(level_name)
+
+            channel_active_quizzes[channel_id] = {
+                "en": en_sentence,
+                "th": th_sentence,
+                "level": level_name,
+                "started_by": interaction.user.mention,
+                "wrong_count": 0
             }
 
-        embed = discord.Embed(
-            title=f"🎯 ทายคำศัพท์ระดับ {level}",
-            description=f"คำศัพท์: **{quiz_data['word']}**\n\nคำแปลภาษาไทยคือข้อใด?:",
-            color=0x3498DB
-        )
+            embed = discord.Embed(
+                title=f"📝 โจทย์ฝึกแปล ({level_name})",
+                description=f"ผู้กดเริ่ม: {interaction.user.mention}\n\nแปลประโยคนี้เป็นภาษาอังกฤษ:\n> **\"{th_sentence}\"**\n\n*(พิมพ์คำตอบในช่องได้เลย หรือกดปุ่มเฉลยด้านล่างหากยอมแพ้)*",
+                color=discord.Color.purple()
+            )
+            await interaction.followup.send(embed=embed, view=SkipQuizView(channel_id))
 
-        await interaction.followup.send(embed=embed, view=QuizChoiceView(quiz_data["correct"], quiz_data["choices"]))
+        except Exception as e:
+            print(f"Error generating sentence: {e}")
+            await interaction.followup.send("⚠️ เกิดข้อผิดพลาด กรุณากดปุ่มเพื่อลองใหม่อีกครั้งครับ", ephemeral=True)
 
-    @discord.ui.button(label="A0 (ง่ายมาก)", style=discord.ButtonStyle.primary)
-    async def btn_a0(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_level_click(interaction, "A0")
+# ==========================================
+# 💬 คำสั่ง !quiz
+# ==========================================
+@bot.command(name="quiz")
+async def start_quiz(ctx):
+    embed = discord.Embed(
+        title="🎯 เมนูฝึกแปลภาษาอังกฤษ",
+        description="กดเลือกความยากเพื่อเริ่มสุ่มโจทย์ใหม่ได้เลยครับ (เล่นร่วมกันได้ทุกคน)",
+        color=discord.Color.gold()
+    )
+    await ctx.send(embed=embed, view=QuizLevelView())
 
-    @discord.ui.button(label="A1 (ง่าย)", style=discord.ButtonStyle.primary)
-    async def btn_a1(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_level_click(interaction, "A1")
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        pass
+    else:
+        print(f"Command Error: {error}")
 
-    @discord.ui.button(label="A2 (ปานกลาง)", style=discord.ButtonStyle.primary)
-    async def btn_a2(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_level_click(interaction, "A2")
-
-    @discord.ui.button(label="B1 (ท้าทาย)", style=discord.ButtonStyle.success)
-    async def btn_b1(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_level_click(interaction, "B1")
-
-    @discord.ui.button(label="B2 (ยากขึ้น)", style=discord.ButtonStyle.success)
-    async def btn_b2(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_level_click(interaction, "B2")
-
+# ==========================================
+# 💬 ระบบตรวจคำตอบ
+# ==========================================
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    msg_content = message.content.strip().lower()
-    if msg_content in ["t!", "!t"]:
-        embed = discord.Embed(title="🎯 เกมทายคำศัพท์ภาษาอังกฤษ (คำศัพท์ใช้งานจริง)", description="เลือกระดับความยากด้านล่างเพื่อเริ่มสุ่มคำถามง่ายๆ ได้เลยครับ:", color=0xF1C40F)
-        await message.channel.send(embed=embed, view=LevelSelectView())
-        return
-
     await bot.process_commands(message)
 
-token = os.getenv("DISCORD_TOKEN")
-if token:
-    bot.run(token)
+    if not message.content.startswith("!"):
+        channel_id = message.channel.id
+
+        if message.channel.id == TARGET_CHANNEL_ID and channel_id in channel_active_quizzes:
+            quiz_data = channel_active_quizzes[channel_id]
+            user_ans = message.content.strip()
+
+            is_correct = await check_answer_with_ai(quiz_data["th"], quiz_data["en"], user_ans)
+
+            if is_correct:
+                msg = f"🎉 **ถูกต้องครับ!** ยอดเยี่ยมมาก {message.author.mention}\nตัวอย่างประโยค: `{quiz_data['en']}`"
+                del channel_active_quizzes[channel_id]
+
+                embed = discord.Embed(
+                    title="🎯 เลือกเลเวลเพื่อเริ่มเล่นข้อต่อไปได้เลยครับ:",
+                    color=discord.Color.gold()
+                )
+                await message.channel.send(content=msg, embed=embed, view=QuizLevelView())
+            else:
+                quiz_data["wrong_count"] += 1
+                
+                if quiz_data["wrong_count"] >= 3:
+                    hint = f"\n💡 **เฉลย:** ตัวอย่างประโยคคือ `{quiz_data['en']}`"
+                    await message.channel.send(f"❌ **ผิดครับ!** {message.author.mention}{hint}\n*(ลองพิมพ์ให้ตรงตามตัวอย่าง หรือกดปุ่มข้ามโจทย์เพื่อเปลี่ยนข้อได้เลยครับ)*")
+                else:
+                    await message.channel.send(f"❌ **ผิดครับ!** {message.author.mention} ลองใหม่อีกครั้งนะครับ (ตอบผิดครั้งที่ {quiz_data['wrong_count']}/3)")
+
+# ==========================================
+# 🚀 บอทออนไลน์
+# ==========================================
+@bot.event
+async def on_ready():
+    print(f"✅ บอทระบบพร้อมใช้งานแล้ว: {bot.user.name}")
+
+bot.run(BOT_TOKEN)
     
