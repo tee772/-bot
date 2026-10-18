@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 # ==========================================
 TARGET_CHANNEL_ID = 1555905970050437206
 BOT_TOKEN = "MTU1NTg5OTk0MzE4MzQ1MDE4Mw.Gy0qEO.6JBccig9EbpgO3NCePLWSxs3cZsseyo8CQ1qgo"
-HF_API_KEY = "HFAKdyL7hbwbffg1swoJuBTXQL8tveN"
+HF_API_KEY = "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"
 
 hf_client = InferenceClient(
     model="Qwen/Qwen2.5-72B-Instruct",
