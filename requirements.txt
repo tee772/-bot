@@ -1,1 +1,4 @@
+discord.py
+huggingface_hub
+python-dotenv
 
